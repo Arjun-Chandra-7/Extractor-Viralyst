@@ -262,5 +262,36 @@ class TestAutomaticReportValidation(unittest.TestCase):
             validate_report(invalid_rep)
 
 
+class TestCorpusTrainMode(unittest.TestCase):
+    def test_contractions_normalization(self):
+        from backend.corpus import _normalize_contractions
+        text = "it's there's don't they'll we've he'd"
+        norm = _normalize_contractions(text)
+        self.assertEqual(norm, "it is there is do not they will we have he would")
+
+    def test_archetype_classification(self):
+        from backend.corpus import _classify_content_archetype
+        self.assertEqual(_classify_content_archetype("Check out this podcast episode", True, 2, 30.0, 5, {}), "talking_head")
+        self.assertEqual(_classify_content_archetype("Here is a tutorial on how to do step 1", False, 10, 30.0, 10, {}), "tutorial")
+        self.assertEqual(_classify_content_archetype("Get 50% discount with link in bio", False, 8, 30.0, 5, {}), "ad")
+
+    def test_end_to_end_corpus_train(self):
+        from pathlib import Path
+        from backend.corpus import analyse_corpus
+        test_video = Path("uploads/2061004d6841.mp4")
+        if test_video.exists():
+            report = analyse_corpus(test_video, "ct-test-01", test_video.name)
+            self.assertEqual(report["mode"], "CORPUS_TRAIN")
+            self.assertIn("script", report)
+            self.assertIn("editing", report)
+            self.assertIn("audio", report)
+            self.assertIn("color", report)
+            self.assertIn("captions", report)
+            self.assertGreater(report["script"]["word_count"], 50)
+            self.assertEqual(report["editing"]["cut_count"], 2)
+            self.assertGreater(len(report["captions"]["events"]), 10)
+            self.assertTrue(report["training_eligibility"]["overall_training_eligible"])
+
+
 if __name__ == "__main__":
     unittest.main()

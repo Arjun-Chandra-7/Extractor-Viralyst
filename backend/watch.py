@@ -13,6 +13,7 @@ from .turbo import analyse_turbo
 from .alignment import align_modalities
 from .ocr import extract_text_overlay
 from .contract import atomic_json_write, validate_report, reconcile_states
+from .corpus import analyse_corpus
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
@@ -67,7 +68,11 @@ class FolderWatcher:
             total_started = time.perf_counter()
             stages = {}
 
-            if self.mode == "turbo":
+            if self.mode == "corpus_train":
+                stage_started = time.perf_counter()
+                report = analyse_corpus(source, report_id, source.name, transcript_model=self.transcript_model)
+                stages["corpus_train_analysis"] = round(time.perf_counter() - stage_started, 3)
+            elif self.mode == "turbo":
                 stage_started = time.perf_counter()
                 report = analyse_turbo(source, report_id, source.name)
                 stages["turbo_analysis"] = round(time.perf_counter() - stage_started, 3)
@@ -83,16 +88,17 @@ class FolderWatcher:
                 report["text_overlay"] = text_overlay
                 stages["measurement_and_edit_detection"] = round(time.perf_counter() - stage_started, 3)
 
-            if self.transcript and self.mode != "turbo":
-                print(f"[transcribing] {source.name} ({self.transcript_model})", flush=True)
-                stage_started = time.perf_counter()
-                report["transcript"] = enrich_transcript(source, self.transcript_model)
-                stages["transcript"] = round(time.perf_counter() - stage_started, 3)
+                if self.transcript:
+                    print(f"[transcribing] {source.name} ({self.transcript_model})", flush=True)
+                    stage_started = time.perf_counter()
+                    report["transcript"] = enrich_transcript(source, self.transcript_model)
+                    stages["transcript"] = round(time.perf_counter() - stage_started, 3)
 
-            stage_started = time.perf_counter()
-            report = align_modalities(report)
-            report = reconcile_states(report)
-            stages["alignment"] = round(time.perf_counter() - stage_started, 3)
+                stage_started = time.perf_counter()
+                report = align_modalities(report)
+                report = reconcile_states(report)
+                stages["alignment"] = round(time.perf_counter() - stage_started, 3)
+
             report["processing"]["stage_seconds"] = stages
             report["processing"]["elapsed_seconds_total"] = round(time.perf_counter() - total_started, 3)
 
@@ -156,7 +162,7 @@ def main():
     parser.add_argument("--inbox", type=Path, default=root / "drop-videos-here")
     parser.add_argument("--reports", type=Path, default=root / "watched-reports")
     parser.add_argument("--failed", type=Path, default=root / "failed-videos")
-    parser.add_argument("--mode", choices=("turbo", "standard", "forensic"), default="standard")
+    parser.add_argument("--mode", choices=("corpus_train", "turbo", "standard", "forensic"), default="corpus_train")
     parser.add_argument("--transcript", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--transcript-model", default="base.en", help="Faster-Whisper model; base.en is fast with high accuracy")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
