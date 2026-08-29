@@ -19,7 +19,13 @@ Run the watcher and leave its terminal open:
 ./watch-videos.sh
 ```
 
-Then copy videos into `drop-videos-here/`. For each completed copy, the watcher creates an individual JSON report in `watched-reports/`, validates that report, and deletes the source video. If extraction fails, the video is moved to `failed-videos/` and is **not** deleted.
+Then copy videos into `drop-videos-here/`. For each completed copy, the watcher creates an individual JSON report in `watched-reports/`, validates that report, and deletes the source video. If extraction fails, the video is moved to `failed-videos/` and is **not** deleted. Watched reports include Faster-Whisper transcript intelligence by default: per-word time/confidence/punctuation, pauses, emphasized-word evidence, segment delivery speed and overall WPM.
+
+The default `tiny.en` model is optimized for a few-second CPU pass. For higher accuracy at lower speed, use:
+
+```bash
+./watch-videos.sh --transcript-model base.en
+```
 
 Turbo mode is the default. For the slower detailed CPU report:
 

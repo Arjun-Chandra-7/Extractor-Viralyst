@@ -8,19 +8,21 @@ import signal
 import time
 from pathlib import Path
 
-from .pipeline import analyse
+from .pipeline import analyse, enrich_transcript
 from .turbo import analyse_turbo
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
 
 class FolderWatcher:
-    def __init__(self, inbox: Path, reports: Path, failed: Path, mode: str, poll_seconds: float):
+    def __init__(self, inbox: Path, reports: Path, failed: Path, mode: str, poll_seconds: float, transcript: bool, transcript_model: str):
         self.inbox = inbox.resolve()
         self.reports = reports.resolve()
         self.failed = failed.resolve()
         self.mode = mode
         self.poll_seconds = poll_seconds
+        self.transcript = transcript
+        self.transcript_model = transcript_model
         self.running = True
         self.observed: dict[Path, tuple[int, int]] = {}
         for folder in (self.inbox, self.reports, self.failed):
@@ -61,6 +63,9 @@ class FolderWatcher:
         print(f"[extracting] {source.name} ({self.mode})", flush=True)
         try:
             report = engine(source, report_id, source.name)
+            if self.transcript:
+                print(f"[transcribing] {source.name} ({self.transcript_model})", flush=True)
+                report["transcript"] = enrich_transcript(source, self.transcript_model)
             report["watch_folder"] = {
                 "source_deleted_after_report": True,
                 "report_path": str(destination),
@@ -90,7 +95,7 @@ class FolderWatcher:
             print(f"[failed] {source.name}: {exc}; preserved={failed_target}", flush=True)
 
     def run(self):
-        print(f"VIRALYST watcher ready\n  drop:    {self.inbox}\n  reports: {self.reports}\n  failed:  {self.failed}\n  mode:    {self.mode}", flush=True)
+        print(f"VIRALYST watcher ready\n  drop:      {self.inbox}\n  reports:   {self.reports}\n  failed:    {self.failed}\n  mode:      {self.mode}\n  transcript:{self.transcript} ({self.transcript_model})", flush=True)
         while self.running:
             for path in list(self.ready_files()):
                 if not self.running:
@@ -122,9 +127,11 @@ def main():
     parser.add_argument("--reports", type=Path, default=root / "watched-reports")
     parser.add_argument("--failed", type=Path, default=root / "failed-videos")
     parser.add_argument("--mode", choices=("turbo", "detailed"), default="turbo")
+    parser.add_argument("--transcript", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--transcript-model", default="tiny.en", help="Faster-Whisper model; tiny.en is fastest, base.en is more accurate")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     args = parser.parse_args()
-    watcher = FolderWatcher(args.inbox, args.reports, args.failed, args.mode, max(.25, args.poll_seconds))
+    watcher = FolderWatcher(args.inbox, args.reports, args.failed, args.mode, max(.25, args.poll_seconds), args.transcript, args.transcript_model)
     signal.signal(signal.SIGINT, watcher.stop)
     signal.signal(signal.SIGTERM, watcher.stop)
     watcher.run()

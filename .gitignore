@@ -25,3 +25,4 @@ models/
 *.partial
 
 .DS_Store
+:memory:.ses

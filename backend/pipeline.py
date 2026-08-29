@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import av
 import numpy as np
 
 MAX_SAMPLES = 96
+_WHISPER_MODELS = {}
 
 
 def q(values, percentile):
@@ -160,14 +162,54 @@ def _intent(edits,audio,duration):
     return out
 
 
-def enrich_transcript(path):
+def enrich_transcript(path, model_name=None):
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc: raise RuntimeError("Install faster-whisper to enable transcript enrichment.") from exc
-    model_name=os.getenv("VIRALYST_WHISPER_MODEL", "base")
-    model=WhisperModel(model_name, device="auto", compute_type="int8")
-    segments, info=model.transcribe(str(path), word_timestamps=True, vad_filter=True)
-    words=[]
-    for seg in segments:
-        for word in seg.words or []: words.append({"word":word.word,"start":round(word.start,3),"end":round(word.end,3),"confidence":round(word.probability,3)})
-    return {"status":"complete","language":info.language,"language_probability":round(info.language_probability,3),"spoken":words,"speakers":[],"pauses":[],"note":"Speaker diarization is intentionally a separate optional stage."}
+    model_name=model_name or os.getenv("VIRALYST_WHISPER_MODEL", "base.en")
+    if model_name not in _WHISPER_MODELS:
+        _WHISPER_MODELS[model_name]=WhisperModel(model_name, device="auto", compute_type="int8", cpu_threads=max(1, min(8, os.cpu_count() or 4)))
+    model=_WHISPER_MODELS[model_name]
+    raw_segments, info=model.transcribe(str(path), word_timestamps=True, vad_filter=True, beam_size=1, best_of=1, condition_on_previous_text=False)
+    words=[]; segments=[]
+    for index, seg in enumerate(raw_segments):
+        segment_words=[]
+        for raw in seg.words or []:
+            token=raw.word.strip(); punctuation="".join(re.findall(r"[^\w\s']",token))
+            clean=token.rstrip(".,!?;:\"”’") or token
+            item={"word":clean,"display":token,"start":round(raw.start,3),"end":round(raw.end,3),"confidence":round(raw.probability,3),"punctuation":punctuation,"segment":index}
+            words.append(item); segment_words.append(item)
+        duration=max(float(seg.end-seg.start),.001)
+        segments.append({"index":index,"start":round(seg.start,3),"end":round(seg.end,3),"text":seg.text.strip(),"words_per_minute":round(len(segment_words)*60/duration,1),"avg_log_probability":round(float(seg.avg_logprob),3),"no_speech_probability":round(float(seg.no_speech_prob),3)})
+    pauses=[]
+    for before, after in zip(words,words[1:]):
+        gap=round(after["start"]-before["end"],3)
+        if gap>=.2:
+            pauses.append({"start":before["end"],"end":after["start"],"duration":gap,"after_word":before["display"],"type":"long" if gap>=1 else "short" if gap>=.45 else "micro"})
+            after["pause_before_seconds"]=gap
+    emphasized=_emphasis(path,words)
+    duration=max((words[-1]["end"]-words[0]["start"]) if words else 0,.001)
+    punctuation_events=[{"time":w["end"],"mark":w["punctuation"],"word":w["word"]} for w in words if w["punctuation"]]
+    return {"status":"complete","engine":f"faster-whisper/{model_name}","language":info.language,"language_probability":round(info.language_probability,3),"full_text":" ".join(w["display"] for w in words),"spoken":words,"segments":segments,"delivery":{"overall_words_per_minute":round(len(words)*60/duration,1),"word_count":len(words),"speaking_span_seconds":round(duration,3)},"pauses":pauses,"emphasized_words":emphasized,"punctuation_events":punctuation_events,"speaker_changes":{"status":"requires_diarization","track":[]}}
+
+
+def _emphasis(path, words):
+    """Align word spans with source energy; punctuation also supplies emphasis evidence."""
+    if not words:return []
+    con=av.open(str(path)); stream=next((s for s in con.streams if s.type=="audio"),None)
+    if stream is None:return []
+    rate=8000; resampler=av.AudioResampler(format="fltp",layout="mono",rate=rate); chunks=[]
+    for frame in con.decode(stream):
+        for item in resampler.resample(frame):chunks.append(item.to_ndarray().reshape(-1))
+    con.close()
+    if not chunks:return []
+    audio=np.concatenate(chunks); levels=[]
+    for word in words:
+        start=max(0,int(word["start"]*rate)); end=min(len(audio),max(start+1,int(word["end"]*rate)))
+        levels.append(20*math.log10(float(np.sqrt(np.mean(audio[start:end]**2)+1e-12))+1e-12))
+    median=float(np.median(levels)); output=[]
+    for word,level in zip(words,levels):
+        delta=level-median; punctuation_emphasis=any(mark in word["punctuation"] for mark in "!?")
+        word["energy_dbfs"]=round(level,2); word["emphasized"]=bool(delta>=3 or punctuation_emphasis)
+        if word["emphasized"]:output.append({"word":word["display"],"start":word["start"],"end":word["end"],"energy_above_median_db":round(delta,2),"evidence":"punctuation_and_energy" if punctuation_emphasis else "energy"})
+    return output
