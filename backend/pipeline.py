@@ -185,6 +185,7 @@ def _standard_training_features(report: dict) -> dict:
         "excluded": {
             "unverified_edit_events": len(report["editing"]["verified_events"]) - len(eligible_events),
             "intent": "never used as a core training label without human/semantic verification",
+            "semantic_sections": "rule-based structural hypotheses; excluded from core training ground truth",
         },
     }
 
@@ -419,8 +420,8 @@ def _color(frames: list[dict]) -> dict:
                 "metric_definition": {
                     "formula": "((mean(R) - mean(B)) / ((mean(R) + mean(G) + mean(B))/3 + 1e-6)) * 100",
                     "units": "percentage_bias (%)",
-                    "calibration_basis": "D65 standard neutral balance; neutral in [-4.0, +4.0] %, warm > 4.0 %, cool < -4.0 %",
-                    "threshold_justification": "Corresponds to +/- 200K correlated color temperature shift in standard Rec.709 sRGB space.",
+                    "calibration_basis": "Empirical red-vs-blue chromatic bias percentage relative to equal energy white (neutral range [-4.0, +4.0] %; warm > +4.0 %, cool < -4.0 %)",
+                    "threshold_justification": "Empirical channel delta threshold; does not claim calibrated physical Kelvin / CCT conversion without illuminant spectral data.",
                 },
                 "interpretation": "warm" if red_blue_bias > 4.0 else "cool" if red_blue_bias < -4.0 else "neutral",
             },

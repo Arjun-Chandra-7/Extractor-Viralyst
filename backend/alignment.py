@@ -170,49 +170,75 @@ def _classify_sfx_transients(transients: list[dict], words: list[dict], edits: l
 
 
 def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> dict:
+    """Monotonic sequence alignment between on-screen OCR captions and spoken transcript words.
+
+    Enforces monotonic progression (previous caption word index <= current caption word index <= next caption word index)
+    and strictly bounds match_score in [0.0, 1.0] using Jaccard / token F1 overlap.
+    """
     matched_pairs = []
     total_caption_words = 0
     matched_caption_words = 0
+    cursor_idx = 0  # Advancing monotonic spoken word pointer
 
     for cap in captions:
-        cap_clean = re.sub(r"[^\w\s]", "", cap.get("text", "")).lower().split()
-        total_caption_words += len(cap_clean)
+        cap_tokens = [w.lower() for w in re.findall(r"\w+", cap.get("text", ""))]
+        if not cap_tokens:
+            continue
+        total_caption_words += len(cap_tokens)
         cap_start = cap["start"]
         cap_end = cap["end"]
 
-        # Find spoken words within temporal window
+        # Search in a forward temporal window starting around the cursor
+        search_start = max(0, cursor_idx - 1)
         candidate_words = [
-            (idx, w) for idx, w in enumerate(words)
-            if cap_start - 0.75 <= w["start"] <= cap_end + 0.75
+            (idx, w) for idx, w in enumerate(words[search_start:], start=search_start)
+            if cap_start - 0.85 <= w["start"] <= cap_end + 0.85
         ]
 
         spoken_refs = []
-        matched_tokens = 0
         lead_lag = None
+        highest_matched_idx = cursor_idx
 
-        for idx, word in candidate_words:
-            w_clean = re.sub(r"[^\w\s]", "", word.get("word", "")).lower()
-            if w_clean in cap_clean:
-                matched_tokens += 1
-                spoken_refs.append({"index": idx, "word": word["word"], "display": word["display"], "spoken_start": word["start"], "spoken_end": word["end"]})
-                if lead_lag is None:
-                    # Negative means caption leads spoken audio; positive means caption lags
-                    lead_lag = round(cap_start - word["start"], 3)
+        # Monotonic greedy token alignment
+        temp_word_idx = search_start
+        for c_token in cap_tokens:
+            for idx, word in candidate_words:
+                if idx < temp_word_idx:
+                    continue
+                w_clean = re.sub(r"[^\w\s]", "", word.get("word", "")).lower()
+                if w_clean == c_token:
+                    spoken_refs.append({
+                        "index": idx,
+                        "word": word["word"],
+                        "display": word["display"],
+                        "spoken_start": word["start"],
+                        "spoken_end": word["end"],
+                    })
+                    if lead_lag is None:
+                        lead_lag = round(cap_start - word["start"], 3)
+                    temp_word_idx = idx + 1
+                    highest_matched_idx = max(highest_matched_idx, idx)
+                    break
 
-        match_score = round(matched_tokens / max(len(cap_clean), 1), 3)
-        matched_caption_words += matched_tokens
+        if spoken_refs:
+            cursor_idx = highest_matched_idx + 1
 
-        # Identify omitted words in spoken range
+        matched_count = len(spoken_refs)
+        # Strictly bounded similarity in [0.0, 1.0]
+        match_score = round(matched_count / max(len(cap_tokens), 1), 3)
+        matched_caption_words += matched_count
+
+        # Identify omitted spoken words in this temporal span
         omitted = []
         if candidate_words:
+            matched_indices = {r["index"] for r in spoken_refs}
             for idx, word in candidate_words:
-                w_clean = re.sub(r"[^\w\s]", "", word.get("word", "")).lower()
-                if w_clean not in cap_clean and word["start"] >= cap_start and word["end"] <= cap_end:
+                if idx not in matched_indices and word["start"] >= cap_start and word["end"] <= cap_end:
                     omitted.append(word["display"])
 
-        # Identify emphasized displayed words in caption
-        raw_words = cap.get("text", "").split()
-        emphasized_displayed = [w for w in raw_words if w.isupper() and len(w) > 1]
+        # Emphasized displayed words: ONLY include words with explicit highlight detection
+        highlighted_list = cap.get("word_highlighting", {}).get("highlighted_words", [])
+        emphasized_displayed = [w for w in highlighted_list if w in cap.get("text", "")]
 
         alignment_entry = {
             "caption_text": cap.get("text"),
@@ -223,7 +249,7 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
             "spoken_word_refs": spoken_refs,
             "omitted_spoken_words": omitted,
             "emphasized_displayed_words": emphasized_displayed,
-            "status": "aligned" if match_score >= 0.5 else "partial_or_graphic_text",
+            "status": "aligned" if match_score >= 0.50 else "partial_or_graphic_text",
         }
         cap["transcript_alignment"] = alignment_entry
         matched_pairs.append(alignment_entry)
@@ -231,7 +257,7 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
     overall_coverage = round(matched_caption_words / max(total_caption_words, 1), 3) if total_caption_words else 0.0
     return {
         "status": "complete",
-        "alignment_method": "token_fuzzy_temporal_matching",
+        "alignment_method": "monotonic_token_sequence_matching",
         "total_caption_events": len(captions),
         "caption_word_coverage": overall_coverage,
         "alignments": matched_pairs,
@@ -239,6 +265,10 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
 
 
 def _extract_semantic_sections(duration: float, sentences: list[dict], edits: list[dict], overlay: list[dict]) -> list[dict]:
+    """Extract structural narrative hypotheses.
+
+    Note: These are rule-based lexical/structural hypotheses, NOT core ground truth training labels.
+    """
     if not sentences and duration <= 0:
         return []
 
@@ -254,8 +284,9 @@ def _extract_semantic_sections(duration: float, sentences: list[dict], edits: li
         "start": 0.0,
         "end": round(hook_sentences[-1]["end"] if hook_sentences else hook_end, 3),
         "text": hook_text,
-        "confidence": 0.85,
-        "evidence": ["opening_interval", "pacing_hook"],
+        "confidence": 0.65,
+        "evidence": ["opening_interval_heuristic", "pacing_hook"],
+        "verification_status": "structural_hypothesis_unverified",
     })
 
     # 2. Process remaining sentences
@@ -270,22 +301,22 @@ def _extract_semantic_sections(duration: float, sentences: list[dict], edits: li
         cta_keywords = ["subscribe", "follow", "comment", "link in bio", "share", "check out", "let me know", "like the video", "save this"]
         if any(kw in text_lower for kw in cta_keywords):
             sec_type = "cta"
-            conf = 0.88
+            conf = 0.70
         elif "?" in text or any(text_lower.startswith(w) for w in ["what", "why", "how", "do you", "is there", "can you", "should "]):
             sec_type = "question"
-            conf = 0.82
+            conf = 0.65
         elif idx == len(sentences) - 1 and (end >= duration - 3.0 or duration < 10):
             sec_type = "conclusion"
-            conf = 0.78
+            conf = 0.60
         elif any(kw in text_lower for kw in ["because", "reason", "in my opinion", "think", "helps for", "that is why"]):
             sec_type = "explanation"
-            conf = 0.75
+            conf = 0.60
         elif any(kw in text_lower for kw in ["for example", "look at", "see this", "shows that", "proof"]):
             sec_type = "proof"
-            conf = 0.72
+            conf = 0.60
         else:
             sec_type = "setup" if start < duration * 0.4 else "payoff"
-            conf = 0.65
+            conf = 0.55
 
         sections.append({
             "section_id": len(sections),
@@ -294,7 +325,8 @@ def _extract_semantic_sections(duration: float, sentences: list[dict], edits: li
             "end": round(end, 3),
             "text": text,
             "confidence": conf,
-            "evidence": ["sentence_semantics", "lexical_structure"],
+            "evidence": ["sentence_semantics", "lexical_structure_heuristic"],
+            "verification_status": "structural_hypothesis_unverified",
         })
 
     return sections

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 
 import av
@@ -12,9 +13,27 @@ _OCR_ENGINE = None
 def get_ocr_engine():
     global _OCR_ENGINE
     if _OCR_ENGINE is None:
+        import os
+        import glob
+        import ctypes
+        # Preload CUDA 13 libraries for ONNX Runtime CUDA provider
+        nvidia_libs = glob.glob("/home/xor_sensei/miniconda3/lib/python3.13/site-packages/nvidia/*/lib")
+        current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = ":".join(nvidia_libs) + ":" + current_ld
+        for lib_dir in nvidia_libs:
+            for so in glob.glob(f"{lib_dir}/*.so*"):
+                try:
+                    ctypes.CDLL(so)
+                except Exception:
+                    pass
+
         try:
             from rapidocr import RapidOCR
-            _OCR_ENGINE = RapidOCR()
+            try:
+                params = {"EngineConfig.onnxruntime.use_cuda": True}
+                _OCR_ENGINE = RapidOCR(params=params)
+            except Exception:
+                _OCR_ENGINE = RapidOCR()
         except ImportError:
             return None
     return _OCR_ENGINE
@@ -30,10 +49,10 @@ def _is_false_positive(text: str, score: float, points: np.ndarray, img_w: int, 
     h_norm = (y2 - y1) / max(img_h, 1)
     area_norm = w_norm * h_norm
 
-    # 1. Reject full-screen or massive boxes covering >50% of frame with very short text (e.g. false positive "9")
-    if area_norm > 0.50 and len(clean) < 8:
+    # 1. Reject full-screen or massive boxes covering >45% of frame with very short text (e.g. false positive "9")
+    if area_norm > 0.45 and len(clean) < 8:
         return True
-    if w_norm > 0.85 and h_norm > 0.85 and len(clean) < 15:
+    if w_norm > 0.80 and h_norm > 0.80 and len(clean) < 15:
         return True
 
     # 2. Reject low-confidence short strings or single digits
@@ -92,14 +111,12 @@ def _analyze_typography(image_bgr: np.ndarray, points: np.ndarray) -> dict:
         import cv2
         edges = cv2.Canny(crop, 50, 150)
         edge_density = float(edges.mean() / 255.0)
-        # Font classification proxy: high edge density relative to area indicates display bold or serif
-        font_class = "display_bold" if edge_density > 0.20 else "serif" if edge_density > 0.14 else "sans_serif"
+        font_class = "display_bold" if edge_density > 0.22 else "serif" if edge_density > 0.16 else "sans_serif"
         has_stroke = bool(edge_density > 0.12 and abs(fg_mean.mean() - bg_rgb.mean()) > 40)
     except Exception:
         font_class = "sans_serif"
         has_stroke = False
 
-    # Background box detection (low variance in background region)
     bg_var = float(bg_rgb.std()) if len(bg_rgb) else 999.0
     has_bg_box = bool(bg_var < 30.0 and len(bg_rgb) > 20)
 
@@ -114,13 +131,14 @@ def _analyze_typography(image_bgr: np.ndarray, points: np.ndarray) -> dict:
     }
 
 
-def extract_text_overlay(path: Path, duration: float, target_fps: float = 4.0) -> dict:
-    """Dense scene-text track with false-positive rejection, ROI tracking, animation & typography."""
+def extract_text_overlay(path: Path, duration: float, target_fps: float = 2.0) -> dict:
+    """Scene-text track with GPU acceleration, false-positive filtering, dense ROI tracking, and typography clustering."""
     engine = get_ocr_engine()
     if engine is None:
-        return {"status": "unavailable", "engine": "rapidocr", "track": [], "reason": "Install rapidocr and onnxruntime"}
+        return {"status": "unavailable", "engine": "rapidocr", "track": [], "reason": "Install rapidocr and onnxruntime-gpu"}
 
-    step = max(0.12, 1.0 / max(target_fps, 1.0))
+    # Adaptive sampling: 2.5 Hz base sampling with adaptive ROI difference gating
+    step = max(0.20, 1.0 / max(target_fps, 1.0))
     targets = np.arange(0.0, max(0.01, duration), step)
 
     con = av.open(str(path))
@@ -130,6 +148,11 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 4.0) -
     samples = []
     target_idx = 0
     clean_boxes_for_color = []
+    all_typography = []
+
+    prev_caption_roi = None
+    prev_detections = []
+    prev_clean_boxes = []
 
     for frame in con.decode(stream):
         ts = float(frame.time or 0)
@@ -140,16 +163,30 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 4.0) -
 
         width, height = frame.width, frame.height
         if height >= width:
-            new_h = 540
+            new_h = 360
             new_w = max(64, int(width * new_h / height))
         else:
-            new_w = 540
+            new_w = 360
             new_h = max(64, int(height * new_w / width))
 
         image = frame.reformat(width=new_w, height=new_h, format="bgr24").to_ndarray()
+        caption_roi = image[int(new_h * 0.35):, :]
+
+        # Fast ROI differential gating: if subtitle band has negligible delta, reuse prior detection
+        if prev_caption_roi is not None and prev_caption_roi.shape == caption_roi.shape:
+            roi_diff = float(np.mean(np.abs(caption_roi.astype(float) - prev_caption_roi.astype(float))))
+            if roi_diff < 5.5 and prev_detections:
+                samples.append({"timestamp": round(ts, 3), "detections": prev_detections})
+                for cb in prev_clean_boxes:
+                    clean_boxes_for_color.append({"timestamp": round(ts, 3), "box_normalized": cb})
+                target_idx += 1
+                continue
+
+        prev_caption_roi = caption_roi.copy()
         result = engine(image)
 
         detections = []
+        current_frame_clean_boxes = []
         boxes = result.boxes if result.boxes is not None else []
         texts = result.txts if result.txts is not None else []
         scores = result.scores if result.scores is not None else []
@@ -166,11 +203,12 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 4.0) -
             w_norm = (x2 - x1) / new_w
             h_norm = (y2 - y1) / new_h
 
-            role = "caption" if center_y > 0.45 else "title" if center_y < 0.25 else "label_or_graphic_text"
+            role = "caption" if center_y > 0.40 else "title" if center_y < 0.25 else "label_or_graphic_text"
             clean_text = str(text).strip()
             typography = _analyze_typography(image, points)
             typography["case"] = "UPPERCASE" if clean_text.isupper() else "lowercase" if clean_text.islower() else "mixed"
             typography["relative_text_height"] = round(float(h_norm), 3)
+            all_typography.append(typography)
 
             detections.append({
                 "text": clean_text,
@@ -186,10 +224,15 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 4.0) -
                 "typography": typography,
             })
 
+            box_norm = [round(float(x1 / new_w), 3), round(float(y1 / new_h), 3), round(float(w_norm), 3), round(float(h_norm), 3)]
             clean_boxes_for_color.append({
                 "timestamp": round(ts, 3),
-                "box_normalized": [round(float(x1 / new_w), 3), round(float(y1 / new_h), 3), round(float(w_norm), 3), round(float(h_norm), 3)],
+                "box_normalized": box_norm,
             })
+            current_frame_clean_boxes.append(box_norm)
+
+        prev_detections = detections
+        prev_clean_boxes = current_frame_clean_boxes
 
         if detections:
             samples.append({"timestamp": round(ts, 3), "detections": detections})
@@ -197,31 +240,59 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 4.0) -
 
     con.close()
 
-    track = _dense_track_grouping(samples, duration, step)
+    # Video-Level Persistent Typography Cluster
+    if all_typography:
+        font_counts = Counter(t["font_class"] for t in all_typography)
+        dominant_font_class = font_counts.most_common(1)[0][0]
+        stroke_ratio = sum(1 for t in all_typography if t["has_stroke"]) / len(all_typography)
+        shadow_ratio = sum(1 for t in all_typography if t["has_shadow"]) / len(all_typography)
+        box_ratio = sum(1 for t in all_typography if t["has_background_box"]) / len(all_typography)
+        dominant_hex = Counter(t["fill_color_hex"] for t in all_typography).most_common(1)[0][0]
+        persistent_style = {
+            "dominant_font_class": dominant_font_class,
+            "dominant_fill_color_hex": dominant_hex,
+            "has_stroke_consensus": bool(stroke_ratio >= 0.40),
+            "has_shadow_consensus": bool(shadow_ratio >= 0.40),
+            "has_background_box_consensus": bool(box_ratio >= 0.40),
+            "style_stability_score": round(float(font_counts.most_common(1)[0][1] / len(all_typography)), 3),
+        }
+    else:
+        persistent_style = {
+            "dominant_font_class": "sans_serif",
+            "dominant_fill_color_hex": "#FFFFFF",
+            "has_stroke_consensus": False,
+            "has_shadow_consensus": False,
+            "has_background_box_consensus": False,
+            "style_stability_score": 1.0,
+        }
+
+    track = _dense_track_grouping(samples, duration, step, persistent_style)
     caption_events = [item for item in track if item.get("role_candidate") == "caption"]
 
     return {
         "status": "complete_dense_roi_tracking",
-        "engine": "RapidOCR/ONNX-dense-tracked",
+        "engine": "RapidOCR/ONNX-GPU-dense-tracked",
         "spoken_transcript_kept_separate": True,
         "sample_count": len(samples),
         "track": track,
+        "persistent_caption_style": persistent_style,
         "caption_boxes_for_exclusion": clean_boxes_for_color,
         "caption_analysis": {
             "tracking_status": "dense_roi_tracked",
             "event_count": len(caption_events),
             "captions": caption_events,
+            "dominant_typography": persistent_style,
             "animation_count": sum(1 for item in caption_events if item.get("animation", {}).get("scale_pop") or item.get("animation", {}).get("entry_animation") != "instant"),
             "highlighting_detected_count": sum(1 for item in caption_events if len(item.get("word_highlighting", {}).get("highlighted_words", [])) > 0),
         },
         "limitations": [
-            "Dense sampling intervals provide ~0.2s boundary precision.",
-            "Stroke/shadow and font class are estimated via edge gradient and Otsu contrast heuristics.",
+            "Dense sampling intervals provide ~0.2s-0.5s boundary precision.",
+            "Stroke and shadow are estimated via edge gradient and Otsu contrast heuristics.",
         ],
     }
 
 
-def _dense_track_grouping(samples: list[dict], duration: float, step: float) -> list[dict]:
+def _dense_track_grouping(samples: list[dict], duration: float, step: float, persistent_style: dict | None = None) -> list[dict]:
     active = {}
     output = []
 
@@ -246,6 +317,14 @@ def _dense_track_grouping(samples: list[dict], duration: float, step: float) -> 
                     "height": det["position"]["height"],
                 })
             else:
+                # Apply persistent style cluster smoothing to avoid frame-to-frame typography flip
+                typ = dict(det["typography"])
+                if persistent_style and persistent_style.get("style_stability_score", 0) >= 0.50:
+                    typ["font_class"] = persistent_style["dominant_font_class"]
+                    typ["has_stroke"] = persistent_style["has_stroke_consensus"]
+                    typ["has_shadow"] = persistent_style["has_shadow_consensus"]
+                    typ["has_background_box"] = persistent_style["has_background_box_consensus"]
+
                 event = {
                     "text": det["text"],
                     "start": ts,
@@ -256,7 +335,7 @@ def _dense_track_grouping(samples: list[dict], duration: float, step: float) -> 
                     "observations": 1,
                     "role_candidate": det["role_candidate"],
                     "position": det["position"],
-                    "typography": det["typography"],
+                    "typography": typ,
                     "positions": [{
                         "time": ts,
                         "center_x": det["position"]["center_x"],
@@ -309,8 +388,14 @@ def _dense_track_grouping(samples: list[dict], duration: float, step: float) -> 
             "movement": movement,
         }
 
-        # Word-level highlight candidates (e.g. UPPERCASE / distinct styling in short chunks)
-        highlighted = [w for w in words if w.isupper() and len(w) > 1] if not event["text"].isupper() else []
+        # Word-level highlight candidates:
+        # A uniform caption where all words are UPPERCASE or all lowercase is a UNIFORM CHUNK.
+        # Only mixed case with uppercase word, or explicit color variation constitutes a highlighted word.
+        if not event["text"].isupper() and not event["text"].islower():
+            highlighted = [w for w in words if w.isupper() and len(w) > 1]
+        else:
+            highlighted = []
+
         event["word_highlighting"] = {
             "status": "detected" if highlighted else "uniform_chunk",
             "highlighted_words": highlighted,

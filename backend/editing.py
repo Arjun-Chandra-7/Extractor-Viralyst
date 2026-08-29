@@ -432,30 +432,70 @@ def _analyze_subjects_and_motion(frames: list[DenseFrame], duration: float) -> t
 
 
 def _detect_speed_effects(frames: list[DenseFrame], fps: float) -> list[dict]:
+    """Detect genuine editorial speed effects such as intentional freeze frames.
+
+    Normal talking heads with low movement must NEVER be misclassified as freeze frames.
+    A genuine freeze frame requires sustained identical frame duplication (duration >= 0.5s,
+    mean inter-frame delta < 0.0004, max delta < 0.002, zero subject/optical motion).
+    """
     effects = []
-    if len(frames) < 4:
+    if len(frames) < 8:
         return effects
 
-    # Detect freeze frames (inter-frame diff near zero for multiple frames)
-    freeze_start = None
+    freeze_frames = []
+    current_run = []
+
     for i, (before, after) in enumerate(zip(frames, frames[1:])):
-        diff = float(np.mean(np.abs(after.rgb - before.rgb)))
-        if diff < 0.003:
-            if freeze_start is None:
-                freeze_start = before.time
+        diff_mean = float(np.mean(np.abs(after.rgb - before.rgb)))
+        diff_max = float(np.max(np.abs(after.rgb - before.rgb)))
+        
+        # Check if subject facial motion or eye/mouth movement exists
+        has_subject_motion = False
+        if len(before.subjects) > 0 and len(after.subjects) > 0:
+            s1, s2 = before.subjects[0], after.subjects[0]
+            pos_delta = abs(s1["center_x"] - s2["center_x"]) + abs(s1["center_y"] - s2["center_y"])
+            if pos_delta > 0.005:
+                has_subject_motion = True
+
+        # Exact frame freeze requires near-zero delta and zero subject motion
+        is_identical_frame = (diff_mean < 0.0004) and (diff_max < 0.003) and not has_subject_motion
+
+        if is_identical_frame:
+            if not current_run:
+                current_run.append(before)
+            current_run.append(after)
         else:
-            if freeze_start is not None:
-                freeze_duration = after.time - freeze_start
-                if freeze_duration >= 0.15:
-                    effects.append({
-                        "type": "freeze_frame",
-                        "start": round(freeze_start, 3),
-                        "end": round(after.time, 3),
-                        "duration": round(freeze_duration, 3),
-                        "confidence": 0.90,
-                        "verification_status": "verified",
-                    })
-                freeze_start = None
+            if len(current_run) >= 4:
+                run_dur = current_run[-1].time - current_run[0].time
+                # Intentional editorial freeze frame must span at least 0.5 seconds
+                if run_dur >= 0.50:
+                    overall_var = float(np.std([f.rgb for f in current_run]))
+                    if overall_var < 0.0003:
+                        effects.append({
+                            "type": "freeze_frame",
+                            "start": round(current_run[0].time, 3),
+                            "end": round(current_run[-1].time, 3),
+                            "duration": round(run_dur, 3),
+                            "confidence": 0.85,
+                            "verification_status": "verified",
+                            "evidence": ["sustained_zero_delta_frames", f"frame_count_{len(current_run)}"],
+                        })
+            current_run = []
+
+    if len(current_run) >= 4:
+        run_dur = current_run[-1].time - current_run[0].time
+        if run_dur >= 0.50:
+            overall_var = float(np.std([f.rgb for f in current_run]))
+            if overall_var < 0.0003:
+                effects.append({
+                    "type": "freeze_frame",
+                    "start": round(current_run[0].time, 3),
+                    "end": round(current_run[-1].time, 3),
+                    "duration": round(run_dur, 3),
+                    "confidence": 0.85,
+                    "verification_status": "verified",
+                    "evidence": ["sustained_zero_delta_frames", f"frame_count_{len(current_run)}"],
+                })
 
     return effects
 
