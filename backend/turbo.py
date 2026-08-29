@@ -41,16 +41,30 @@ def analyse_turbo(path: Path, report_id: str, original_name: str) -> dict:
     report = {
         "report_id": report_id,
         "source": source,
-        "processing": {"mode": "TURBO", "sampled_frames": len(frames), "bounded_work": True, "capabilities":{"cut_detection":"candidates_only","pacing_metrics":"not_calculated","intent":"not_inferred"}},
-        "transcript": {"status":"deferred_until_watcher_or_enrichment"},
-        "visual": {"frame_samples": color.pop("frame_samples", []), "shots":[], "subjects":{"status":"deferred"}, "motion":{"status":"deferred"}},
+        "processing": {
+            "mode": "TURBO",
+            "runtime": runtime_profile(),
+            "sampled_frames": len(frames),
+            "bounded_work": True,
+            "capabilities": {"cut_detection": "candidates_only", "pacing_metrics": "not_calculated", "intent": "not_inferred"},
+        },
+        "transcript": {"status": "deferred_until_watcher_or_enrichment"},
+        "visual": {"frame_samples": color.pop("frame_samples", []), "shots": [], "subjects": {"status": "deferred"}, "motion": {"status": "deferred"}},
         "color": color,
         "audio": audio_report,
-        "text_overlay": {"status":"deferred","track":[]},
-        "editing": {"candidate_regions":candidate_regions,"verified_events":[],"summary":{"reliable":False,"reason":"TURBO performs sparse triage only; no cuts or pacing values are claimed."}},
-        "edit_intent": {"status":"not_inferred","events":[],"reason":"No verified edits or sufficient synchronized semantic evidence in TURBO."},
-        "cross_modal_events":[],
-        "confidence":{"policy":"Candidates are excluded from training cut/pacing targets until dense verification.","minimum_training_confidence":.8},
+        "text_overlay": {"status": "deferred", "track": []},
+        "editing": {
+            "candidate_regions": candidate_regions,
+            "verified_events": [],
+            "summary": {
+                "internal_verification_passed": False,
+                "reliable": False,
+                "reason": "TURBO performs sparse triage only; no cuts or pacing values are claimed.",
+            },
+        },
+        "edit_intent": {"status": "not_inferred", "events": [], "reason": "No verified edits or sufficient synchronized semantic evidence in TURBO."},
+        "cross_modal_events": [],
+        "confidence": {"policy": "Candidates are excluded from training cut/pacing targets until dense verification.", "minimum_training_confidence": 0.8},
         "deferred": ["dense_cut_verification", "ocr", "speaker_diarization", "stem_separation", "semantic_video_model"],
     }
     report["training_features"] = feature_vector(report)

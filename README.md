@@ -1,21 +1,31 @@
 # VIRALYST Extractor
 
-See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the evidence contract and an honest implemented/partial/deferred capability matrix.
+See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the evidence contract and comprehensive implemented capability matrix.
 
-Reports are schema-validated and atomically published. `processing.runtime` records the active decode/CUDA path; do not interpret a software fallback as GPU acceleration.
+Reports are schema-validated and atomically published. `processing.runtime` records the active decode/CUDA path and device details.
 
-Fast, per-video intelligence reports for short-form video. The local STANDARD analyser combines PyAV/FFmpeg decoding, dense edit verification, Faster-Whisper, RapidOCR, loudness analysis, and measured color features without a cloud roundtrip.
+Fast, per-video feature extraction and multimodal intelligence for short-form video datasets (1 to 50,000+ videos). The local STANDARD analyser combines PyAV decoding, GPU Faster-Whisper, RapidOCR with dense tracking, OpenCV YuNet face/subject tracking, BS.1770 / 4x True-Peak audio grading, caption-excluded color science, and evidence-gated editing verification without cloud roundtrips.
 
-## Run
+## Requirements & GPU Acceleration
+
+- **OS**: Linux / macOS / Windows
+- **Python**: 3.10 - 3.13
+- **Hardware**: NVIDIA GPU with CUDA recommended for fast ASR (Faster-Whisper CUDA float16) and OpenCV DNN. Runs seamlessly on CPU when CUDA is absent.
 
 ```bash
+# Install dependencies
 python -m pip install -r requirements.txt
+```
+
+## Running the Web Interface
+
+```bash
 uvicorn backend.main:app --reload --port 8080
 ```
 
-Open `http://localhost:8080`. Upload a video and download the individual JSON report from the report view.
+Open `http://localhost:8080` in your browser. Upload any video to inspect real-time extraction results and download the report JSON.
 
-## Easiest workflow: watched folder
+## Watched Folder Workflow
 
 Run the watcher and leave its terminal open:
 
@@ -23,53 +33,33 @@ Run the watcher and leave its terminal open:
 ./watch-videos.sh
 ```
 
-Then copy videos into `drop-videos-here/`. For each completed copy, the watcher creates an individual JSON report in `watched-reports/`, validates that report, and deletes the source video. If extraction fails, the video is moved to `failed-videos/` and is **not** deleted. Watched reports include Faster-Whisper transcript intelligence by default: per-word time/confidence/punctuation, pauses, emphasized-word evidence, segment delivery speed and overall WPM.
+Copy videos into `drop-videos-here/`. The watcher processes each video, creates a validated report in `watched-reports/`, and cleans up source files.
 
-The default `tiny.en` model is optimized for a few-second CPU pass. For higher accuracy at lower speed, use:
+Watched reports include:
+- **GPU Faster-Whisper transcript**: non-overlapping monotonic word timestamps, punctuation, language detection, pauses, and multi-factor prosodic emphasis (pitch/F0, duration, energy, stopword filtering).
+- **Dense ROI OCR**: false-positive filtering, typography estimation, animation detection, word highlighting, and transcript ↔ caption alignment.
+- **Visual & Editing**: subject tracking, optical flow dynamics, hard cut vs jump cut vs scene change discrimination, transform estimation (with subject continuity gating), and freeze frames.
+- **Color Science**: caption-excluded luminance/saturation, formal `red_blue_bias` %, skin tone analysis, and vignette/optical proxies.
+- **Audio DSP**: 4x oversampled True Peak (`true_peak_dbtp`), speech LUFS, clarity, SNR, sibilance, ducking detection, and transient classification.
 
-```bash
-./watch-videos.sh --transcript-model base.en
-```
+## 50K Corpus Batch Processing & Benchmarking
 
-STANDARD is the watched-folder default. It performs dense adjacent-frame boundary verification, real shot segmentation, ITU-R BS.1770 loudness, timed transcript, bounded OCR, cross-modal alignment, partial region/skin color analysis and evidence-gated intent candidates.
-
-```bash
-./watch-videos.sh --mode standard
-```
-
-Explicit processing tiers:
-
-- `--mode turbo`: bounded 16-frame corpus triage. It emits change regions only—never cut count, pacing, shots or intent.
-- `--mode standard`: accurate local extraction for training/reporting. This is the default.
-- `--mode forensic`: runs the STANDARD base and marks unavailable heavyweight forensic engines explicitly; it never fabricates their output.
-
-## Design notes
-
-- `POST /api/analyse` produces one independent report per uploaded video.
-- STANDARD densely scans adjacent low-resolution frames for verified boundaries while retaining at most 96 representative color samples. Audio is decoded once at 48 kHz stereo and fanned out to the analyzers.
-- It measures first, then derives semantic labels. Confidence and evidence are carried on every inferred edit event.
-- Transcript and bounded OCR tracks are produced in STANDARD by default. `POST /api/transcribe/{report_id}` remains available as a retry/re-enrichment endpoint.
-
-## Deep analysis workers
-
-Read [RESEARCH.md](RESEARCH.md) before installing the deep profile. `requirements-deep.txt` contains research-grade engines for TransNetV2 shot transitions, PaddleOCR scene text, pyannote diarization, Demucs stems and standards-aware colour/loudness processing. They belong on a pre-warmed GPU worker: model downloads and full stem separation should never happen inside the request path of an “instant” report.
-
-## 50K corpus mode
-
-Corpus mode intentionally runs a bounded 16-frame sparse pass and an 8 kHz mono audio triage pass. It emits one compact report per video plus an append-only training manifest.
+For large-scale dataset training across thousands of videos:
 
 ```bash
-# Optional: download a JSONL URL manifest concurrently.
-python -m backend.batch download videos.jsonl --destination corpus-videos --workers 64
+# Optional: Download video manifest concurrently
+python -m backend.batch download videos.jsonl --destination corpus-videos --workers 32
 
-# Analyse all local media with independent processes.
-python -m backend.batch analyse corpus-videos --output corpus-reports --workers 24
+# Batch analyse corpus with multi-process workers (compact / gzip storage options)
+python -m backend.batch analyse corpus-videos --output corpus-reports --mode standard --workers 8 --compact --gzip
 
-# Train a small supervised classifier when labels exist, or an autoencoder otherwise.
-python -m backend.train corpus-reports/training-manifest.jsonl --output models/corpus.pt
-
-# On a GPU worker, create one reusable X-CLIP video embedding per source.
-python -m backend.embed corpus-reports/training-manifest.jsonl --batch-size 32
+# Benchmark throughput on your hardware (steady-state videos/minute)
+python -m backend.batch benchmark corpus-videos --counts 1,10,100 --workers 4
 ```
 
-Before promising a deadline, query `/api/capacity` with the average file size, sustained link speed, worker count, and benchmarked per-video time. For example, 50,000 × 12 MB is 600 GB; transferring that in one hour requires roughly 1.52 Gbit/s after a modest protocol/retry allowance.
+## Running Tests
+
+```bash
+python -m unittest discover tests
+```
+

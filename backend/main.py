@@ -36,9 +36,9 @@ def index():
 
 
 @app.post("/api/analyse")
-async def analyse_video(video: UploadFile = File(...), mode: str = "standard", transcript: bool = True, transcript_model: str = "tiny.en"):
-    if mode not in {"turbo","standard","forensic"}:
-        raise HTTPException(400,"mode must be turbo, standard, or forensic")
+async def analyse_video(video: UploadFile = File(...), mode: str = "standard", transcript: bool = True, transcript_model: str = "base.en"):
+    if mode not in {"turbo", "standard", "forensic"}:
+        raise HTTPException(400, "mode must be turbo, standard, or forensic")
     if not video.filename:
         raise HTTPException(400, "A video file is required")
     suffix = Path(video.filename).suffix.lower() or ".mp4"
@@ -50,12 +50,19 @@ async def analyse_video(video: UploadFile = File(...), mode: str = "standard", t
         shutil.copyfileobj(video.file, target)
     started = time.perf_counter()
     try:
-        engine = analyse_turbo if mode == "turbo" else analyse
-        report = await asyncio.to_thread(engine, video_path, report_id, video.filename)
-        if mode != "turbo":
-            report["text_overlay"] = await asyncio.to_thread(extract_text_overlay, video_path, report["source"]["duration_seconds"])
-        if transcript:
+        if mode == "turbo":
+            report = await asyncio.to_thread(analyse_turbo, video_path, report_id, video.filename)
+        else:
+            # Step 1: Extract OCR / Text overlay for dense captions & color exclusion
+            ocr_fps = 4.0 if mode == "forensic" else 3.0
+            ocr_res = await asyncio.to_thread(extract_text_overlay, video_path, 60.0, ocr_fps)
+            # Step 2: Dense analysis with caption boxes excluded from color metrics
+            report = await asyncio.to_thread(analyse, video_path, report_id, video.filename, ocr_res.get("caption_boxes_for_exclusion"))
+            report["text_overlay"] = ocr_res
+
+        if transcript and mode != "turbo":
             report["transcript"] = await asyncio.to_thread(enrich_transcript, video_path, transcript_model)
+
         report = align_modalities(report)
         report = reconcile_states(report)
         if mode == "forensic":
@@ -65,9 +72,9 @@ async def analyse_video(video: UploadFile = File(...), mode: str = "standard", t
         video_path.unlink(missing_ok=True)
         raise HTTPException(422, f"Could not analyse this media: {exc}") from exc
     report["processing"]["elapsed_seconds"] = round(time.perf_counter() - started, 2)
-    report["processing"]["status"]="complete"
+    report["processing"]["status"] = "complete"
     validate_report(report)
-    atomic_json_write(REPORTS / f"{report_id}.json",report)
+    atomic_json_write(REPORTS / f"{report_id}.json", report)
     return report
 
 

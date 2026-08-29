@@ -62,35 +62,50 @@ class FolderWatcher:
         report_id = digest.hexdigest()
         destination = self.reports / f"{report_id}-{_safe_stem(source.stem)}.json"
         temporary = destination.with_suffix(".json.partial")
-        engine = analyse_turbo if self.mode == "turbo" else analyse
         print(f"[extracting] {source.name} ({self.mode})", flush=True)
         try:
-            total_started=time.perf_counter(); stage_started=total_started
-            report = engine(source, report_id, source.name)
-            stages={"measurement_and_edit_detection":round(time.perf_counter()-stage_started,3)}
-            if self.mode != "turbo":
-                print(f"[ocr] {source.name} (bounded keyframes)", flush=True)
-                stage_started=time.perf_counter()
-                report["text_overlay"] = extract_text_overlay(source, report["source"]["duration_seconds"],24 if self.mode=="forensic" else 8)
-                stages["ocr"]=round(time.perf_counter()-stage_started,3)
-            if self.transcript:
+            total_started = time.perf_counter()
+            stages = {}
+
+            if self.mode == "turbo":
+                stage_started = time.perf_counter()
+                report = analyse_turbo(source, report_id, source.name)
+                stages["turbo_analysis"] = round(time.perf_counter() - stage_started, 3)
+            else:
+                stage_started = time.perf_counter()
+                print(f"[ocr] {source.name} (dense tracking)", flush=True)
+                ocr_fps = 4.0 if self.mode == "forensic" else 3.0
+                text_overlay = extract_text_overlay(source, 60.0, target_fps=ocr_fps)
+                stages["ocr"] = round(time.perf_counter() - stage_started, 3)
+
+                stage_started = time.perf_counter()
+                report = analyse(source, report_id, source.name, caption_boxes=text_overlay.get("caption_boxes_for_exclusion"))
+                report["text_overlay"] = text_overlay
+                stages["measurement_and_edit_detection"] = round(time.perf_counter() - stage_started, 3)
+
+            if self.transcript and self.mode != "turbo":
                 print(f"[transcribing] {source.name} ({self.transcript_model})", flush=True)
-                stage_started=time.perf_counter()
+                stage_started = time.perf_counter()
                 report["transcript"] = enrich_transcript(source, self.transcript_model)
-                stages["transcript"]=round(time.perf_counter()-stage_started,3)
-            stage_started=time.perf_counter()
+                stages["transcript"] = round(time.perf_counter() - stage_started, 3)
+
+            stage_started = time.perf_counter()
             report = align_modalities(report)
             report = reconcile_states(report)
-            stages["alignment"]=round(time.perf_counter()-stage_started,3); report["processing"]["stage_seconds"]=stages; report["processing"]["elapsed_seconds_total"]=round(time.perf_counter()-total_started,3)
+            stages["alignment"] = round(time.perf_counter() - stage_started, 3)
+            report["processing"]["stage_seconds"] = stages
+            report["processing"]["elapsed_seconds_total"] = round(time.perf_counter() - total_started, 3)
+
             if self.mode == "forensic":
-                report["processing"]["mode"]="FORENSIC_BASE"
-                report["processing"]["note"]="Dense verification and transcript alignment complete; unavailable forensic engines remain explicit in deferred."
+                report["processing"]["mode"] = "FORENSIC_BASE"
+                report["processing"]["note"] = "Dense verification and transcript alignment complete; unavailable forensic engines remain explicit in deferred."
+
             report["watch_folder"] = {
                 "source_deleted_after_report": True,
                 "report_path": str(destination),
             }
-            report["processing"]["status"]="complete"
-            atomic_json_write(destination,report)
+            report["processing"]["status"] = "complete"
+            atomic_json_write(destination, report)
             source.unlink()
             self.observed.pop(source, None)
             print(f"[complete] report={destination.name}; deleted={source.name}", flush=True)
@@ -143,7 +158,7 @@ def main():
     parser.add_argument("--failed", type=Path, default=root / "failed-videos")
     parser.add_argument("--mode", choices=("turbo", "standard", "forensic"), default="standard")
     parser.add_argument("--transcript", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--transcript-model", default="tiny.en", help="Faster-Whisper model; tiny.en is fastest, base.en is more accurate")
+    parser.add_argument("--transcript-model", default="base.en", help="Faster-Whisper model; base.en is fast with high accuracy")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     args = parser.parse_args()
     watcher = FolderWatcher(args.inbox, args.reports, args.failed, args.mode, max(.25, args.poll_seconds), args.transcript, args.transcript_model)
