@@ -1,0 +1,8 @@
+# High-throughput corpus and training node.
+-r requirements.txt
+torch>=2.2
+pyarrow>=16
+transformers>=4.44
+accelerate>=0.33
+# Install the matching NVIDIA DALI wheel from NVIDIA's index on GPU workers.
+# See https://docs.nvidia.com/deeplearning/dali/user-guide/docs/installation.html

@@ -1,0 +1,9 @@
+# Install on dedicated deep-analysis workers, not the latency-sensitive API container.
+scenedetect[opencv]>=0.6.4
+pyloudnorm>=0.1.1
+colour-science>=0.4.6
+paddleocr>=3.0
+pyannote.audio>=3.3
+demucs>=4.0
+# TransNetV2 is sourced from GitHub; pin a tested commit before production rollout.
+git+https://github.com/soCzech/TransNetV2.git#subdirectory=inference-pytorch

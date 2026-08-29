@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime uploads and generated reports.
+uploads/
+reports/
+drop-videos-here/*
+!drop-videos-here/.gitkeep
+watched-reports/*
+!watched-reports/.gitkeep
+failed-videos/*
+!failed-videos/.gitkeep
+
+# Corpus/training artifacts can be hundreds of gigabytes.
+corpus-videos/
+corpus-reports/
+models/
+*.pt
+*.pth
+*.npz
+*.parquet
+*.partial
+
+.DS_Store
