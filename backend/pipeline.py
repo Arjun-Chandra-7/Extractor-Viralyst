@@ -10,6 +10,7 @@ import av
 import numpy as np
 
 from .editing import dense_verify_full_video, verified_edit_summary
+from .contract import VERSION, content_hash, runtime_profile
 
 MAX_SAMPLES = 96
 _WHISPER_MODELS = {}
@@ -42,8 +43,8 @@ def analyse(path: Path, report_id: str, original_name: str) -> dict:
     color["per_shot"]=_per_shot_color(frame_samples,shots)
     report={
         "report_id": report_id,
-        "source": {"filename": original_name, "duration_seconds": round(duration, 3), "resolution": f"{width}×{height}", "fps": round(fps, 3), "has_audio": bool(audio)},
-        "processing": {"mode": "STANDARD", "sampled_frames": len(frame_data), "dense_adjacent_frame_verification":True,"elapsed_seconds": None},
+        "source": {"filename": original_name, "content_hash":content_hash(path), "duration_seconds": round(duration, 3), "resolution": f"{width}×{height}", "fps": round(fps, 3), "has_audio": bool(audio)},
+        "processing": {"status":"running","extractor_version":VERSION,"runtime":runtime_profile(),"mode": "STANDARD", "sampled_frames": len(frame_data), "dense_adjacent_frame_verification":True,"elapsed_seconds": None},
         "transcript": {"status": "awaiting_enrichment"},
         "visual":{"frame_samples":frame_samples,"shots":shots,"subjects":{"status":"deferred"},"motion":{"status":"deferred"}},
         "color": color,
@@ -239,10 +240,11 @@ def enrich_transcript(path, model_name=None):
         for raw in seg.words or []:
             token=raw.word.strip(); punctuation="".join(re.findall(r"[^\w\s']",token))
             clean=token.rstrip(".,!?;:\"”’") or token
-            item={"word":clean,"display":token,"start":round(raw.start,3),"end":round(raw.end,3),"confidence":round(raw.probability,3),"punctuation":punctuation,"segment":index}
+            raw_start,raw_end=round(raw.start,3),round(raw.end,3)
+            item={"word":clean,"display":token,"raw_start":raw_start,"raw_end":raw_end,"aligned_start":raw_start,"aligned_end":max(raw_end,round(raw_start+.02,3)),"start":raw_start,"end":max(raw_end,round(raw_start+.02,3)),"confidence":round(raw.probability,3),"punctuation":punctuation,"segment":index,"timing_status":"aligned" if raw_end>raw_start else "repaired_minimum_duration"}
             words.append(item); segment_words.append(item)
         duration=max(float(seg.end-seg.start),.001)
-        segments.append({"index":index,"start":round(seg.start,3),"end":round(seg.end,3),"text":seg.text.strip(),"words_per_minute":round(len(segment_words)*60/duration,1),"avg_log_probability":round(float(seg.avg_logprob),3),"no_speech_probability":round(float(seg.no_speech_prob),3)})
+        segments.append({"index":index,"start":round(seg.start,3),"end":round(seg.end,3),"text":seg.text.strip(),"words_per_minute":round(len(segment_words)*60/duration,1) if duration>=2 else None,"delivery_rate_status":"measured" if duration>=2 else "insufficient_window","avg_log_probability":round(float(seg.avg_logprob),3),"no_speech_probability":round(float(seg.no_speech_prob),3)})
     pauses=[]
     for before, after in zip(words,words[1:]):
         gap=round(after["start"]-before["end"],3)
@@ -260,7 +262,11 @@ def enrich_transcript(path, model_name=None):
             sentence_words=[]
     if sentence_words:sentences.append({"sentence_id":len(sentences),"start":sentence_words[0]["start"],"end":sentence_words[-1]["end"],"text":" ".join(item["display"] for item in sentence_words),"confidence":round(float(np.mean([item["confidence"] for item in sentence_words])),3)})
     _AUDIO_CACHE.pop(cache_key,None)
-    return {"status":"complete","engine":f"faster-whisper/{model_name}","language":info.language,"language_probability":round(info.language_probability,3),"full_text":" ".join(w["display"] for w in words),"words":words,"sentences":sentences,"segments":segments,"delivery":{"overall_words_per_minute":round(len(words)*60/duration,1),"word_count":len(words),"speaking_span_seconds":round(duration,3)},"pauses":pauses,"emphasized_words":emphasized,"punctuation_events":punctuation_events,"speaker_changes":{"status":"requires_diarization","track":[]}}
+    rolling=[]
+    for start in np.arange(words[0]["start"] if words else 0,(words[-1]["end"] if words else 0),2.0):
+        window=[w for w in words if start<=w["start"]<start+4]
+        if len(window)>=3: rolling.append({"start":round(float(start),3),"end":round(float(start+4),3),"words_per_minute":round(len(window)*15,1),"status":"measured"})
+    return {"status":"complete","engine":f"faster-whisper/{model_name}","language":info.language,"language_probability":round(info.language_probability,3),"full_text":" ".join(w["display"] for w in words),"words":words,"sentences":sentences,"segments":segments,"delivery":{"overall_words_per_minute":round(len(words)*60/duration,1),"word_count":len(words),"speaking_span_seconds":round(duration,3),"rolling_windows":rolling},"prosody":{"status":"energy_relative_to_neighboring_words","emphasis_candidates":emphasized,"limitations":["Pitch/F0 and syllable stress require a dedicated prosody model."]},"pauses":pauses,"emphasized_words":emphasized,"punctuation_events":punctuation_events,"speaker_changes":{"status":"requires_diarization","track":[]}}
 
 
 def _emphasis(path, words, cached_audio=None, cached_rate=16000):
@@ -283,7 +289,8 @@ def _emphasis(path, words, cached_audio=None, cached_rate=16000):
         levels.append(20*math.log10(float(np.sqrt(np.mean(audio[start:end]**2)+1e-12))+1e-12))
     median=float(np.median(levels)); output=[]
     for word,level in zip(words,levels):
-        delta=level-median; punctuation_emphasis=any(mark in word["punctuation"] for mark in "!?")
-        word["energy_dbfs"]=round(level,2); word["emphasized"]=bool(delta>=3 or punctuation_emphasis)
-        if word["emphasized"]:output.append({"word":word["display"],"start":word["start"],"end":word["end"],"energy_above_median_db":round(delta,2),"evidence":"punctuation_and_energy" if punctuation_emphasis else "energy"})
+        left=max(0,len(levels)-1); local=np.median(levels[max(0,words.index(word)-2):min(len(levels),words.index(word)+3)])
+        delta=level-local
+        word["energy_dbfs"]=round(level,2); word["prosodic_emphasis_candidate"]=bool(delta>=3)
+        if word["prosodic_emphasis_candidate"]:output.append({"word":word["display"],"start":word["start"],"end":word["end"],"energy_above_local_words_db":round(float(delta),2),"confidence":round(min(.75,.45+max(0,delta)/12),3),"evidence":["local_word_energy"],"verification_status":"candidate"})
     return output

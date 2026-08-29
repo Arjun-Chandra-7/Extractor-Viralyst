@@ -2,6 +2,8 @@
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the evidence contract and an honest implemented/partial/deferred capability matrix.
 
+Reports are schema-validated and atomically published. `processing.runtime` records the active decode/CUDA path; do not interpret a software fallback as GPU acceleration.
+
 Fast, per-video intelligence reports for short-form video. The local STANDARD analyser combines PyAV/FFmpeg decoding, dense edit verification, Faster-Whisper, RapidOCR, loudness analysis, and measured color features without a cloud roundtrip.
 
 ## Run

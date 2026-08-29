@@ -2,6 +2,7 @@ import unittest
 
 from backend.alignment import align_modalities
 from backend.editing import build_shots, verified_edit_summary
+from backend.contract import validate_report
 
 
 class ReportContractTests(unittest.TestCase):
@@ -32,6 +33,10 @@ class ReportContractTests(unittest.TestCase):
     def test_confidence_is_never_implicit_one(self):
         event={"timestamp":2.0,"type":"hard_cut","verification_status":"verified","candidate_confidence":.64,"verification_confidence":.96,"final_confidence":.88}
         self.assertLess(event["final_confidence"],1)
+
+    def test_validator_rejects_invalid_word_interval(self):
+        report={"report_id":"x","source":{"duration_seconds":2},"processing":{},"transcript":{"words":[{"word":"bad","start":1,"end":1,"confidence":.5}]},"visual":{},"color":{},"audio":{},"text_overlay":{},"editing":{"verified_events":[],"summary":{}},"semantic":{},"edit_intent":{},"cross_modal_events":[],"training_features":{},"confidence":{},"deferred":[]}
+        with self.assertRaises(ValueError): validate_report(report)
 
 
 if __name__=="__main__":

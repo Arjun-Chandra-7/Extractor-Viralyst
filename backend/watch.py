@@ -12,6 +12,7 @@ from .pipeline import analyse, enrich_transcript
 from .turbo import analyse_turbo
 from .alignment import align_modalities
 from .ocr import extract_text_overlay
+from .contract import atomic_json_write, validate_report, reconcile_states
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
@@ -79,6 +80,7 @@ class FolderWatcher:
                 stages["transcript"]=round(time.perf_counter()-stage_started,3)
             stage_started=time.perf_counter()
             report = align_modalities(report)
+            report = reconcile_states(report)
             stages["alignment"]=round(time.perf_counter()-stage_started,3); report["processing"]["stage_seconds"]=stages; report["processing"]["elapsed_seconds_total"]=round(time.perf_counter()-total_started,3)
             if self.mode == "forensic":
                 report["processing"]["mode"]="FORENSIC_BASE"
@@ -87,12 +89,8 @@ class FolderWatcher:
                 "source_deleted_after_report": True,
                 "report_path": str(destination),
             }
-            temporary.write_text(json.dumps(report, indent=2), encoding="utf-8")
-            # Validate before publishing the report or deleting the source.
-            validated = json.loads(temporary.read_text(encoding="utf-8"))
-            if validated.get("report_id") != report_id:
-                raise ValueError("Report validation failed")
-            temporary.replace(destination)
+            report["processing"]["status"]="complete"
+            atomic_json_write(destination,report)
             source.unlink()
             self.observed.pop(source, None)
             print(f"[complete] report={destination.name}; deleted={source.name}", flush=True)

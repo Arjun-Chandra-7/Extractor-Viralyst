@@ -18,6 +18,7 @@ from .capacity import capacity_plan
 from .turbo import analyse_turbo
 from .alignment import align_modalities
 from .ocr import extract_text_overlay
+from .contract import atomic_json_write, validate_report, reconcile_states
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports"
@@ -56,6 +57,7 @@ async def analyse_video(video: UploadFile = File(...), mode: str = "standard", t
         if transcript:
             report["transcript"] = await asyncio.to_thread(enrich_transcript, video_path, transcript_model)
         report = align_modalities(report)
+        report = reconcile_states(report)
         if mode == "forensic":
             report["processing"]["mode"] = "FORENSIC_BASE"
             report["processing"]["note"] = "Dense verification and transcript alignment complete; unavailable forensic engines remain explicit in deferred."
@@ -63,7 +65,9 @@ async def analyse_video(video: UploadFile = File(...), mode: str = "standard", t
         video_path.unlink(missing_ok=True)
         raise HTTPException(422, f"Could not analyse this media: {exc}") from exc
     report["processing"]["elapsed_seconds"] = round(time.perf_counter() - started, 2)
-    (REPORTS / f"{report_id}.json").write_text(json.dumps(report, indent=2))
+    report["processing"]["status"]="complete"
+    validate_report(report)
+    atomic_json_write(REPORTS / f"{report_id}.json",report)
     return report
 
 
@@ -100,5 +104,7 @@ async def transcribe(report_id: str):
     except Exception as exc:
         raise HTTPException(503, str(exc)) from exc
     report=align_modalities(report)
-    report_path.write_text(json.dumps(report, indent=2))
+    report=reconcile_states(report)
+    report["processing"]["status"]="complete"
+    atomic_json_write(report_path,report)
     return report
