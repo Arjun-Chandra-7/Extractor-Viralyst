@@ -184,6 +184,8 @@ def _standard_training_features(report: dict) -> dict:
         },
         "excluded": {
             "unverified_edit_events": len(report["editing"]["verified_events"]) - len(eligible_events),
+            "unverified_speed_effects": len([e for e in report["visual"].get("speed_effects", []) if not e.get("training_eligible")]),
+            "typography_classifications": "candidate style proxy; excluded from core training labels without style verification",
             "intent": "never used as a core training label without human/semantic verification",
             "semantic_sections": "rule-based structural hypotheses; excluded from core training ground truth",
         },

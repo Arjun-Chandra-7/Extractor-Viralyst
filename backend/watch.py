@@ -74,7 +74,7 @@ class FolderWatcher:
             else:
                 stage_started = time.perf_counter()
                 print(f"[ocr] {source.name} (dense tracking)", flush=True)
-                ocr_fps = 4.0 if self.mode == "forensic" else 3.0
+                ocr_fps = 3.0 if self.mode == "forensic" else 2.0
                 text_overlay = extract_text_overlay(source, 60.0, target_fps=ocr_fps)
                 stages["ocr"] = round(time.perf_counter() - stage_started, 3)
 

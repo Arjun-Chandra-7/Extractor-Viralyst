@@ -434,15 +434,15 @@ def _analyze_subjects_and_motion(frames: list[DenseFrame], duration: float) -> t
 def _detect_speed_effects(frames: list[DenseFrame], fps: float) -> list[dict]:
     """Detect genuine editorial speed effects such as intentional freeze frames.
 
-    Normal talking heads with low movement must NEVER be misclassified as freeze frames.
+    Normal talking heads with subtle movement must NEVER be misclassified as freeze frames.
     A genuine freeze frame requires sustained identical frame duplication (duration >= 0.5s,
-    mean inter-frame delta < 0.0004, max delta < 0.002, zero subject/optical motion).
+    mean inter-frame delta < 0.0003, max delta < 0.002, zero subject/optical motion).
+    Uncertain or short low-motion intervals are marked as candidate with training_eligible=False.
     """
     effects = []
     if len(frames) < 8:
         return effects
 
-    freeze_frames = []
     current_run = []
 
     for i, (before, after) in enumerate(zip(frames, frames[1:])):
@@ -454,11 +454,14 @@ def _detect_speed_effects(frames: list[DenseFrame], fps: float) -> list[dict]:
         if len(before.subjects) > 0 and len(after.subjects) > 0:
             s1, s2 = before.subjects[0], after.subjects[0]
             pos_delta = abs(s1["center_x"] - s2["center_x"]) + abs(s1["center_y"] - s2["center_y"])
-            if pos_delta > 0.005:
+            if pos_delta > 0.004:
                 has_subject_motion = True
 
-        # Exact frame freeze requires near-zero delta and zero subject motion
-        is_identical_frame = (diff_mean < 0.0004) and (diff_max < 0.003) and not has_subject_motion
+        # Flow magnitude check
+        flow_mag = float(getattr(after, "flow_mag", 0.0))
+
+        # Exact frame freeze requires near-zero delta, near-zero flow, and zero subject motion
+        is_identical_frame = (diff_mean < 0.0003) and (diff_max < 0.002) and not has_subject_motion and (flow_mag < 0.005)
 
         if is_identical_frame:
             if not current_run:
@@ -467,35 +470,57 @@ def _detect_speed_effects(frames: list[DenseFrame], fps: float) -> list[dict]:
         else:
             if len(current_run) >= 4:
                 run_dur = current_run[-1].time - current_run[0].time
-                # Intentional editorial freeze frame must span at least 0.5 seconds
-                if run_dur >= 0.50:
-                    overall_var = float(np.std([f.rgb for f in current_run]))
-                    if overall_var < 0.0003:
-                        effects.append({
-                            "type": "freeze_frame",
-                            "start": round(current_run[0].time, 3),
-                            "end": round(current_run[-1].time, 3),
-                            "duration": round(run_dur, 3),
-                            "confidence": 0.85,
-                            "verification_status": "verified",
-                            "evidence": ["sustained_zero_delta_frames", f"frame_count_{len(current_run)}"],
-                        })
+                overall_var = float(np.std([f.rgb for f in current_run]))
+                # Intentional editorial freeze frame must span at least 0.5 seconds of sustained exact identity
+                if run_dur >= 0.50 and overall_var < 0.0002:
+                    effects.append({
+                        "type": "freeze_frame",
+                        "start": round(current_run[0].time, 3),
+                        "end": round(current_run[-1].time, 3),
+                        "duration": round(run_dur, 3),
+                        "confidence": 0.85,
+                        "verification_status": "verified",
+                        "training_eligible": True,
+                        "evidence": ["sustained_zero_delta_frames", f"frame_count_{len(current_run)}"],
+                    })
+                elif run_dur >= 0.40 and overall_var < 0.0006:
+                    effects.append({
+                        "type": "freeze_frame",
+                        "start": round(current_run[0].time, 3),
+                        "end": round(current_run[-1].time, 3),
+                        "duration": round(run_dur, 3),
+                        "confidence": 0.50,
+                        "verification_status": "candidate",
+                        "training_eligible": False,
+                        "evidence": ["low_motion_candidate_unverified"],
+                    })
             current_run = []
 
     if len(current_run) >= 4:
         run_dur = current_run[-1].time - current_run[0].time
-        if run_dur >= 0.50:
-            overall_var = float(np.std([f.rgb for f in current_run]))
-            if overall_var < 0.0003:
-                effects.append({
-                    "type": "freeze_frame",
-                    "start": round(current_run[0].time, 3),
-                    "end": round(current_run[-1].time, 3),
-                    "duration": round(run_dur, 3),
-                    "confidence": 0.85,
-                    "verification_status": "verified",
-                    "evidence": ["sustained_zero_delta_frames", f"frame_count_{len(current_run)}"],
-                })
+        overall_var = float(np.std([f.rgb for f in current_run]))
+        if run_dur >= 0.50 and overall_var < 0.0002:
+            effects.append({
+                "type": "freeze_frame",
+                "start": round(current_run[0].time, 3),
+                "end": round(current_run[-1].time, 3),
+                "duration": round(run_dur, 3),
+                "confidence": 0.85,
+                "verification_status": "verified",
+                "training_eligible": True,
+                "evidence": ["sustained_zero_delta_frames", f"frame_count_{len(current_run)}"],
+            })
+        elif run_dur >= 0.40 and overall_var < 0.0006:
+            effects.append({
+                "type": "freeze_frame",
+                "start": round(current_run[0].time, 3),
+                "end": round(current_run[-1].time, 3),
+                "duration": round(run_dur, 3),
+                "confidence": 0.50,
+                "verification_status": "candidate",
+                "training_eligible": False,
+                "evidence": ["low_motion_candidate_unverified"],
+            })
 
     return effects
 

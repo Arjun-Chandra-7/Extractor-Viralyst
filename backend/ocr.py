@@ -153,6 +153,8 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 2.0) -
     prev_caption_roi = None
     prev_detections = []
     prev_clean_boxes = []
+    ocr_calls_performed = 0
+    ocr_frames_reused = 0
 
     for frame in con.decode(stream):
         ts = float(frame.time or 0)
@@ -175,7 +177,8 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 2.0) -
         # Fast ROI differential gating: if subtitle band has negligible delta, reuse prior detection
         if prev_caption_roi is not None and prev_caption_roi.shape == caption_roi.shape:
             roi_diff = float(np.mean(np.abs(caption_roi.astype(float) - prev_caption_roi.astype(float))))
-            if roi_diff < 5.5 and prev_detections:
+            if roi_diff < 5.5:
+                ocr_frames_reused += 1
                 samples.append({"timestamp": round(ts, 3), "detections": prev_detections})
                 for cb in prev_clean_boxes:
                     clean_boxes_for_color.append({"timestamp": round(ts, 3), "box_normalized": cb})
@@ -184,6 +187,7 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 2.0) -
 
         prev_caption_roi = caption_roi.copy()
         result = engine(image)
+        ocr_calls_performed += 1
 
         detections = []
         current_frame_clean_boxes = []
@@ -240,40 +244,75 @@ def extract_text_overlay(path: Path, duration: float, target_fps: float = 2.0) -
 
     con.close()
 
-    # Video-Level Persistent Typography Cluster
+    total_sampled = max(1, len(samples))
+    reuse_ratio = round(ocr_frames_reused / total_sampled, 3)
+
+    # Video-Level Temporal Typography Clustering
     if all_typography:
         font_counts = Counter(t["font_class"] for t in all_typography)
-        dominant_font_class = font_counts.most_common(1)[0][0]
+        dominant_raw_class = font_counts.most_common(1)[0][0]
+        font_family_class = (
+            "display_candidate" if dominant_raw_class == "display_bold"
+            else "serif_candidate" if dominant_raw_class == "serif"
+            else "sans_serif_candidate"
+        )
         stroke_ratio = sum(1 for t in all_typography if t["has_stroke"]) / len(all_typography)
         shadow_ratio = sum(1 for t in all_typography if t["has_shadow"]) / len(all_typography)
         box_ratio = sum(1 for t in all_typography if t["has_background_box"]) / len(all_typography)
+        upper_ratio = sum(1 for t in all_typography if t["case"] == "UPPERCASE") / len(all_typography)
         dominant_hex = Counter(t["fill_color_hex"] for t in all_typography).most_common(1)[0][0]
+        style_conf = round(float(font_counts.most_common(1)[0][1] / len(all_typography)), 3)
+
         persistent_style = {
-            "dominant_font_class": dominant_font_class,
+            "caption_style_id": "style_0",
+            "font_family_class": font_family_class,
+            "weight_class": "bold" if dominant_raw_class == "display_bold" or stroke_ratio >= 0.40 else "regular",
+            "uppercase": bool(upper_ratio >= 0.70),
+            "stroke": bool(stroke_ratio >= 0.40),
+            "shadow": bool(shadow_ratio >= 0.40),
+            "background_box": bool(box_ratio >= 0.40),
             "dominant_fill_color_hex": dominant_hex,
-            "has_stroke_consensus": bool(stroke_ratio >= 0.40),
-            "has_shadow_consensus": bool(shadow_ratio >= 0.40),
-            "has_background_box_consensus": bool(box_ratio >= 0.40),
-            "style_stability_score": round(float(font_counts.most_common(1)[0][1] / len(all_typography)), 3),
+            "confidence": style_conf,
+            "training_eligible": False,  # Blacklisted from core training ground truth unless verified
         }
     else:
         persistent_style = {
-            "dominant_font_class": "sans_serif",
+            "caption_style_id": "style_0",
+            "font_family_class": "sans_serif_candidate",
+            "weight_class": "regular",
+            "uppercase": True,
+            "stroke": False,
+            "shadow": False,
+            "background_box": False,
             "dominant_fill_color_hex": "#FFFFFF",
-            "has_stroke_consensus": False,
-            "has_shadow_consensus": False,
-            "has_background_box_consensus": False,
-            "style_stability_score": 1.0,
+            "confidence": 1.0,
+            "training_eligible": False,
         }
 
     track = _dense_track_grouping(samples, duration, step, persistent_style)
     caption_events = [item for item in track if item.get("role_candidate") == "caption"]
 
+    # Detect provider name accurately
+    provider_name = "CPUExecutionProvider"
+    try:
+        if hasattr(engine, "text_det") and hasattr(engine.text_det, "session"):
+            providers = engine.text_det.session.session.get_providers()
+            if "CUDAExecutionProvider" in providers:
+                provider_name = "CUDAExecutionProvider"
+    except Exception:
+        pass
+
     return {
         "status": "complete_dense_roi_tracking",
-        "engine": "RapidOCR/ONNX-GPU-dense-tracked",
+        "engine": f"RapidOCR/{provider_name}-dense-tracked",
+        "ocr_provider": provider_name,
         "spoken_transcript_kept_separate": True,
         "sample_count": len(samples),
+        "performance_metrics": {
+            "ocr_calls_performed": ocr_calls_performed,
+            "ocr_frames_skipped_or_reused": ocr_frames_reused,
+            "ocr_reuse_ratio": reuse_ratio,
+        },
         "track": track,
         "persistent_caption_style": persistent_style,
         "caption_boxes_for_exclusion": clean_boxes_for_color,
@@ -317,19 +356,25 @@ def _dense_track_grouping(samples: list[dict], duration: float, step: float, per
                     "height": det["position"]["height"],
                 })
             else:
-                # Apply persistent style cluster smoothing to avoid frame-to-frame typography flip
+                # Apply persistent style cluster smoothing
                 typ = dict(det["typography"])
-                if persistent_style and persistent_style.get("style_stability_score", 0) >= 0.50:
-                    typ["font_class"] = persistent_style["dominant_font_class"]
-                    typ["has_stroke"] = persistent_style["has_stroke_consensus"]
-                    typ["has_shadow"] = persistent_style["has_shadow_consensus"]
-                    typ["has_background_box"] = persistent_style["has_background_box_consensus"]
+                style_id = "style_0"
+                if persistent_style:
+                    style_id = persistent_style.get("caption_style_id", "style_0")
+                    typ["caption_style_id"] = style_id
+                    typ["font_family_class"] = persistent_style["font_family_class"]
+                    typ["weight_class"] = persistent_style["weight_class"]
+                    typ["has_stroke"] = persistent_style["stroke"]
+                    typ["has_shadow"] = persistent_style["shadow"]
+                    typ["has_background_box"] = persistent_style["background_box"]
+                    typ["training_eligible"] = False
 
                 event = {
                     "text": det["text"],
                     "start": ts,
                     "end": ts,
                     "confidence": det["confidence"],
+                    "caption_style_id": style_id,
                     "detection_method": "dense_roi_keyframe_ocr",
                     "verification_status": "observed",
                     "observations": 1,
@@ -359,6 +404,7 @@ def _dense_track_grouping(samples: list[dict], duration: float, step: float, per
         event["duration"] = round(max(0.05, event["end"] - event["start"]), 3)
         words = event["text"].split()
         event["words_visible"] = len(words)
+        event["displayed_words"] = words
 
         # Animation analysis
         positions = event.pop("positions", [])

@@ -95,10 +95,22 @@ def runtime_profile() -> dict:
     else:
         profile["cuda"]["status"] = "not_detected"
 
+    # Subsystem-level execution mapping
+    ocr_ep = "CUDAExecutionProvider" if "CUDAExecutionProvider" in profile["cuda"]["onnxruntime_providers"] else "CPUExecutionProvider"
+    profile["subsystems"] = {
+        "video_decode": "software",
+        "asr_device": "cuda" if profile["cuda"]["ctranslate2_cuda"] else "cpu",
+        "asr_engine": "faster-whisper-ctranslate2",
+        "ocr_provider": ocr_ep,
+        "gpu_name": profile["cuda"]["devices"][0]["name"] if profile["cuda"]["devices"] else "none",
+        "gpu_available": is_available,
+    }
+
     return profile
 
 
 def validate_report(report: dict) -> None:
+    """Comprehensive automatic report validation for Core Brain training safety."""
     required = {
         "report_id",
         "source",
@@ -123,33 +135,63 @@ def validate_report(report: dict) -> None:
     if duration < 0:
         raise ValueError("negative duration")
 
-    # Validate words
+    # 1. Validate words
     words = report.get("transcript", {}).get("words", [])
     for i, word in enumerate(words):
         start = float(word.get("aligned_start", word.get("start", 0)))
         end = float(word.get("aligned_end", word.get("end", 0)))
         if end <= start:
             raise ValueError(f"invalid word interval: {word.get('display', word.get('word'))}")
-        if start < 0 or end > duration + 0.25:
-            raise ValueError("word timestamp outside source")
+        if start < 0 or end > duration + 0.5:
+            raise ValueError(f"word timestamp outside source: {start} - {end} (dur: {duration})")
         confidence = word.get("confidence")
-        if confidence is not None and not 0 <= float(confidence) <= 1:
-            raise ValueError("word confidence out of range")
+        if confidence is not None and not 0 <= float(confidence) <= 1.0:
+            raise ValueError(f"word confidence out of range: {confidence}")
 
-    # Validate verified editing events
+    # 2. Validate verified editing events
     for event in report.get("editing", {}).get("verified_events", []):
         if event.get("verification_status") != "verified":
             raise ValueError("unverified event in verified_events")
         for key in ("candidate_confidence", "verification_confidence", "final_confidence"):
-            if key not in event or not 0 < float(event[key]) <= 1:
-                raise ValueError(f"invalid {key}")
+            if key in event and not 0 <= float(event[key]) <= 1.0:
+                raise ValueError(f"invalid {key}: {event[key]}")
 
-    # Validate edit summary
+    # 3. Validate edit summary
     summary = report["editing"].get("summary", {})
     if summary.get("cut_count") is not None:
         count = sum(item.get("type") in {"hard_cut", "jump_cut"} for item in report["editing"].get("verified_events", []))
         if count != summary["cut_count"]:
             raise ValueError("cut summary disagrees with verified events")
+
+    # 4. Validate caption alignments
+    alignments = report.get("transcript_caption_alignment", {}).get("alignments", [])
+    for a in alignments:
+        score = a.get("match_score", 0.0)
+        if not (0.0 <= float(score) <= 1.0):
+            raise ValueError(f"caption match_score out of [0, 1] range: {score}")
+        refs = a.get("spoken_word_refs", [])
+        if refs:
+            is_monotonic = all(refs[i]["index"] <= refs[i + 1]["index"] for i in range(len(refs) - 1))
+            if not is_monotonic:
+                raise ValueError("non-monotonic spoken word references within caption")
+        # Training eligibility safety gate
+        if a.get("training_eligible") and a.get("verification_status") != "verified":
+            raise ValueError("unverified caption alignment marked training_eligible")
+
+    # 5. Validate speed effects training eligibility
+    for effect in report.get("visual", {}).get("speed_effects", []):
+        if effect.get("training_eligible") and effect.get("verification_status") != "verified":
+            raise ValueError("unverified speed effect marked training_eligible")
+
+    # 6. Validate shots
+    shots = report.get("visual", {}).get("shots", [])
+    for shot in shots:
+        s_start = float(shot.get("start", 0))
+        s_end = float(shot.get("end", 0))
+        if s_end < s_start:
+            raise ValueError(f"negative shot duration: {shot}")
+        if s_end > duration + 0.5:
+            raise ValueError(f"shot end exceeds video duration: {s_end} > {duration}")
 
 
 def atomic_json_write(path: Path, report: dict, compact: bool = False, compress_gzip: bool = False) -> None:

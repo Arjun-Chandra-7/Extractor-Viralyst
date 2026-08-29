@@ -170,17 +170,24 @@ def _classify_sfx_transients(transients: list[dict], words: list[dict], edits: l
 
 
 def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> dict:
-    """Monotonic sequence alignment between on-screen OCR captions and spoken transcript words.
+    """Local monotonic sequence alignment between on-screen OCR captions and spoken transcript words.
 
-    Enforces monotonic progression (previous caption word index <= current caption word index <= next caption word index)
-    and strictly bounds match_score in [0.0, 1.0] using Jaccard / token F1 overlap.
+    Enforces:
+    - Strictly bounded match_score in [0.0, 1.0]
+    - Monotonic index progression within and across sequential captions
+    - Local temporal window gating
+    - One-to-one word ownership with reused word tracking
+    - Clean separation of displayed_words, highlighted_words, and emphasized_displayed_words
+    - Alignment quality gating and training eligibility
     """
     matched_pairs = []
     total_caption_words = 0
     matched_caption_words = 0
     cursor_idx = 0  # Advancing monotonic spoken word pointer
+    globally_assigned_indices = set()
 
     for cap in captions:
+        displayed_words = cap.get("text", "").split()
         cap_tokens = [w.lower() for w in re.findall(r"\w+", cap.get("text", ""))]
         if not cap_tokens:
             continue
@@ -188,44 +195,59 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
         cap_start = cap["start"]
         cap_end = cap["end"]
 
-        # Search in a forward temporal window starting around the cursor
+        # Search in a local forward temporal window around the caption
         search_start = max(0, cursor_idx - 1)
         candidate_words = [
             (idx, w) for idx, w in enumerate(words[search_start:], start=search_start)
-            if cap_start - 0.85 <= w["start"] <= cap_end + 0.85
+            if cap_start - 1.0 <= w["start"] <= cap_end + 1.0
         ]
 
         spoken_refs = []
+        unmatched_caption_tokens = []
         lead_lag = None
         highest_matched_idx = cursor_idx
+        reused_word_count = 0
 
         # Monotonic greedy token alignment
         temp_word_idx = search_start
         for c_token in cap_tokens:
+            token_matched = False
             for idx, word in candidate_words:
                 if idx < temp_word_idx:
                     continue
                 w_clean = re.sub(r"[^\w\s]", "", word.get("word", "")).lower()
                 if w_clean == c_token:
+                    is_reused = idx in globally_assigned_indices
+                    if is_reused:
+                        reused_word_count += 1
+
                     spoken_refs.append({
                         "index": idx,
                         "word": word["word"],
                         "display": word["display"],
                         "spoken_start": word["start"],
                         "spoken_end": word["end"],
+                        "word_reused": is_reused,
                     })
+                    globally_assigned_indices.add(idx)
+
                     if lead_lag is None:
                         lead_lag = round(cap_start - word["start"], 3)
                     temp_word_idx = idx + 1
                     highest_matched_idx = max(highest_matched_idx, idx)
+                    token_matched = True
                     break
+
+            if not token_matched:
+                unmatched_caption_tokens.append(c_token)
 
         if spoken_refs:
             cursor_idx = highest_matched_idx + 1
 
         matched_count = len(spoken_refs)
         # Strictly bounded similarity in [0.0, 1.0]
-        match_score = round(matched_count / max(len(cap_tokens), 1), 3)
+        lexical_coverage = round(matched_count / max(len(cap_tokens), 1), 3)
+        match_score = lexical_coverage
         matched_caption_words += matched_count
 
         # Identify omitted spoken words in this temporal span
@@ -236,19 +258,50 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
                 if idx not in matched_indices and word["start"] >= cap_start and word["end"] <= cap_end:
                     omitted.append(word["display"])
 
-        # Emphasized displayed words: ONLY include words with explicit highlight detection
+        # Check monotonic index ordering
+        monotonicity_passed = all(
+            spoken_refs[i]["index"] < spoken_refs[i + 1]["index"]
+            for i in range(len(spoken_refs) - 1)
+        )
+
+        temporal_error = abs(lead_lag) if lead_lag is not None else 0.0
+
+        # Highlighting & emphasis semantics:
+        # displayed_words: physically visible words
+        # highlighted_words: words with distinct visual styling
+        # emphasized_displayed_words: non-empty ONLY when highlighted words exist
         highlighted_list = cap.get("word_highlighting", {}).get("highlighted_words", [])
         emphasized_displayed = [w for w in highlighted_list if w in cap.get("text", "")]
+
+        # Quality gating & verification
+        if match_score >= 0.70 and monotonicity_passed and reused_word_count == 0 and temporal_error <= 1.25:
+            verification_status = "verified"
+            training_eligible = True
+        elif match_score >= 0.40 and monotonicity_passed:
+            verification_status = "candidate"
+            training_eligible = False
+        else:
+            verification_status = "rejected"
+            training_eligible = False
 
         alignment_entry = {
             "caption_text": cap.get("text"),
             "caption_start": cap_start,
             "caption_end": cap_end,
             "match_score": match_score,
+            "temporal_error_seconds": round(temporal_error, 3),
             "lead_lag_seconds": lead_lag if lead_lag is not None else 0.0,
-            "spoken_word_refs": spoken_refs,
+            "lexical_coverage": lexical_coverage,
+            "monotonicity_passed": monotonicity_passed,
+            "reused_word_count": reused_word_count,
+            "unmatched_caption_words": unmatched_caption_tokens,
             "omitted_spoken_words": omitted,
+            "displayed_words": displayed_words,
+            "highlighted_words": highlighted_list,
             "emphasized_displayed_words": emphasized_displayed,
+            "spoken_word_refs": spoken_refs,
+            "verification_status": verification_status,
+            "training_eligible": training_eligible,
             "status": "aligned" if match_score >= 0.50 else "partial_or_graphic_text",
         }
         cap["transcript_alignment"] = alignment_entry
@@ -257,9 +310,10 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
     overall_coverage = round(matched_caption_words / max(total_caption_words, 1), 3) if total_caption_words else 0.0
     return {
         "status": "complete",
-        "alignment_method": "monotonic_token_sequence_matching",
+        "alignment_method": "local_monotonic_sequence_matching",
         "total_caption_events": len(captions),
         "caption_word_coverage": overall_coverage,
+        "verified_aligned_count": sum(1 for a in matched_pairs if a["training_eligible"]),
         "alignments": matched_pairs,
     }
 
