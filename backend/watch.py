@@ -10,6 +10,8 @@ from pathlib import Path
 
 from .pipeline import analyse, enrich_transcript
 from .turbo import analyse_turbo
+from .alignment import align_modalities
+from .ocr import extract_text_overlay
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
@@ -59,13 +61,28 @@ class FolderWatcher:
         report_id = digest.hexdigest()
         destination = self.reports / f"{report_id}-{_safe_stem(source.stem)}.json"
         temporary = destination.with_suffix(".json.partial")
-        engine = analyse if self.mode == "detailed" else analyse_turbo
+        engine = analyse_turbo if self.mode == "turbo" else analyse
         print(f"[extracting] {source.name} ({self.mode})", flush=True)
         try:
+            total_started=time.perf_counter(); stage_started=total_started
             report = engine(source, report_id, source.name)
+            stages={"measurement_and_edit_detection":round(time.perf_counter()-stage_started,3)}
+            if self.mode != "turbo":
+                print(f"[ocr] {source.name} (bounded keyframes)", flush=True)
+                stage_started=time.perf_counter()
+                report["text_overlay"] = extract_text_overlay(source, report["source"]["duration_seconds"],24 if self.mode=="forensic" else 8)
+                stages["ocr"]=round(time.perf_counter()-stage_started,3)
             if self.transcript:
                 print(f"[transcribing] {source.name} ({self.transcript_model})", flush=True)
+                stage_started=time.perf_counter()
                 report["transcript"] = enrich_transcript(source, self.transcript_model)
+                stages["transcript"]=round(time.perf_counter()-stage_started,3)
+            stage_started=time.perf_counter()
+            report = align_modalities(report)
+            stages["alignment"]=round(time.perf_counter()-stage_started,3); report["processing"]["stage_seconds"]=stages; report["processing"]["elapsed_seconds_total"]=round(time.perf_counter()-total_started,3)
+            if self.mode == "forensic":
+                report["processing"]["mode"]="FORENSIC_BASE"
+                report["processing"]["note"]="Dense verification and transcript alignment complete; unavailable forensic engines remain explicit in deferred."
             report["watch_folder"] = {
                 "source_deleted_after_report": True,
                 "report_path": str(destination),
@@ -126,7 +143,7 @@ def main():
     parser.add_argument("--inbox", type=Path, default=root / "drop-videos-here")
     parser.add_argument("--reports", type=Path, default=root / "watched-reports")
     parser.add_argument("--failed", type=Path, default=root / "failed-videos")
-    parser.add_argument("--mode", choices=("turbo", "detailed"), default="turbo")
+    parser.add_argument("--mode", choices=("turbo", "standard", "forensic"), default="standard")
     parser.add_argument("--transcript", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--transcript-model", default="tiny.en", help="Faster-Whisper model; tiny.en is fastest, base.en is more accurate")
     parser.add_argument("--poll-seconds", type=float, default=1.0)

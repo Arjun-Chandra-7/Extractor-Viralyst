@@ -16,6 +16,8 @@ from fastapi.staticfiles import StaticFiles
 from .pipeline import analyse, enrich_transcript
 from .capacity import capacity_plan
 from .turbo import analyse_turbo
+from .alignment import align_modalities
+from .ocr import extract_text_overlay
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports"
@@ -33,7 +35,9 @@ def index():
 
 
 @app.post("/api/analyse")
-async def analyse_video(video: UploadFile = File(...), mode: str = "turbo"):
+async def analyse_video(video: UploadFile = File(...), mode: str = "standard", transcript: bool = True, transcript_model: str = "tiny.en"):
+    if mode not in {"turbo","standard","forensic"}:
+        raise HTTPException(400,"mode must be turbo, standard, or forensic")
     if not video.filename:
         raise HTTPException(400, "A video file is required")
     suffix = Path(video.filename).suffix.lower() or ".mp4"
@@ -45,8 +49,16 @@ async def analyse_video(video: UploadFile = File(...), mode: str = "turbo"):
         shutil.copyfileobj(video.file, target)
     started = time.perf_counter()
     try:
-        engine = analyse if mode == "detailed" else analyse_turbo
+        engine = analyse_turbo if mode == "turbo" else analyse
         report = await asyncio.to_thread(engine, video_path, report_id, video.filename)
+        if mode != "turbo":
+            report["text_overlay"] = await asyncio.to_thread(extract_text_overlay, video_path, report["source"]["duration_seconds"])
+        if transcript:
+            report["transcript"] = await asyncio.to_thread(enrich_transcript, video_path, transcript_model)
+        report = align_modalities(report)
+        if mode == "forensic":
+            report["processing"]["mode"] = "FORENSIC_BASE"
+            report["processing"]["note"] = "Dense verification and transcript alignment complete; unavailable forensic engines remain explicit in deferred."
     except Exception as exc:
         video_path.unlink(missing_ok=True)
         raise HTTPException(422, f"Could not analyse this media: {exc}") from exc
@@ -87,5 +99,6 @@ async def transcribe(report_id: str):
         report["transcript"] = await asyncio.to_thread(enrich_transcript, candidates[0])
     except Exception as exc:
         raise HTTPException(503, str(exc)) from exc
+    report=align_modalities(report)
     report_path.write_text(json.dumps(report, indent=2))
     return report

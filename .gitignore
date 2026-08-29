@@ -17,7 +17,7 @@ failed-videos/*
 # Corpus/training artifacts can be hundreds of gigabytes.
 corpus-videos/
 corpus-reports/
-models/
+/models/
 *.pt
 *.pth
 *.npz

@@ -24,7 +24,7 @@ Use NVDEC through NVIDIA DALI on production GPU workers, with multiple decode se
 
 ## Editing event policy
 
-Every event must have `start`, `end`, `type`, `confidence`, `evidence`, and `intent_candidates`. An edit is only promoted from *candidate* when at least two compatible signals exist—for example a shot boundary plus scale change (punch-in), or a cut plus beat onset (beat cut). “Match cut”, “B-roll”, “green screen”, “speed ramp”, and “J/L cut” require visual/audio temporal evidence and should remain `unverified` when that evidence is unavailable.
+Every boundary has separate `candidate_confidence`, `verification_confidence`, and `final_confidence`, plus `evidence`, `detection_method`, `verification_status`, and `training_eligible`. Sparse changes are broad candidate regions, never cuts. STANDARD performs a dense adjacent-frame scan and only verified boundaries may create shots or pacing metrics. “Match cut”, “B-roll”, “green screen”, “speed ramp”, and “J/L cut” require visual/audio temporal evidence and remain deferred or unverified when that evidence is unavailable.
 
 ## High-fidelity report contract
 

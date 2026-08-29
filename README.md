@@ -1,6 +1,8 @@
 # VIRALYST Extractor
 
-Fast, per-video intelligence reports for short-form video. The core analyser uses PyAV/FFmpeg decoding and numpy feature extraction, so a report is useful immediately without a cloud roundtrip. Transcript and OCR are opt-in enrichments: install a local Whisper model and/or wire an OCR provider for them.
+See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the evidence contract and an honest implemented/partial/deferred capability matrix.
+
+Fast, per-video intelligence reports for short-form video. The local STANDARD analyser combines PyAV/FFmpeg decoding, dense edit verification, Faster-Whisper, RapidOCR, loudness analysis, and measured color features without a cloud roundtrip.
 
 ## Run
 
@@ -27,18 +29,24 @@ The default `tiny.en` model is optimized for a few-second CPU pass. For higher a
 ./watch-videos.sh --transcript-model base.en
 ```
 
-Turbo mode is the default. For the slower detailed CPU report:
+STANDARD is the watched-folder default. It performs dense adjacent-frame boundary verification, real shot segmentation, ITU-R BS.1770 loudness, timed transcript, bounded OCR, cross-modal alignment, partial region/skin color analysis and evidence-gated intent candidates.
 
 ```bash
-./watch-videos.sh --mode detailed
+./watch-videos.sh --mode standard
 ```
+
+Explicit processing tiers:
+
+- `--mode turbo`: bounded 16-frame corpus triage. It emits change regions only—never cut count, pacing, shots or intent.
+- `--mode standard`: accurate local extraction for training/reporting. This is the default.
+- `--mode forensic`: runs the STANDARD base and marks unavailable heavyweight forensic engines explicitly; it never fabricates their output.
 
 ## Design notes
 
 - `POST /api/analyse` produces one independent report per uploaded video.
-- The fast pass samples video at a bounded cadence (maximum 96 frames) and audio at a 22.05 kHz mono analysis rate. It is designed to make a first report in seconds rather than decode every frame of a long source.
+- STANDARD densely scans adjacent low-resolution frames for verified boundaries while retaining at most 96 representative color samples. Audio is decoded once at 48 kHz stereo and fanned out to the analyzers.
 - It measures first, then derives semantic labels. Confidence and evidence are carried on every inferred edit event.
-- `POST /api/transcribe/{report_id}` adds exact Whisper word timestamps when a local Faster-Whisper model is configured. This is deliberately separate from the fast pass.
+- Transcript and bounded OCR tracks are produced in STANDARD by default. `POST /api/transcribe/{report_id}` remains available as a retry/re-enrichment endpoint.
 
 ## Deep analysis workers
 
