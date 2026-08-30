@@ -1,0 +1,17 @@
+[Unit]
+Description=VIRALYST EXTRACTOR watched-folder worker
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xor_sensei/Dev/Viralyst/Extractor
+ExecStart=/home/xor_sensei/miniconda3/bin/python3 -m backend.watch --mode standard --poll-seconds 0.5
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
+StandardOutput=append:/home/xor_sensei/Dev/Viralyst/Extractor/watched-reports/watcher.log
+StandardError=append:/home/xor_sensei/Dev/Viralyst/Extractor/watched-reports/watcher.log
+
+[Install]
+WantedBy=default.target

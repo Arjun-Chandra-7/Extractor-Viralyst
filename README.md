@@ -57,6 +57,16 @@ python extract-corpus.py --benchmark-dir benchmark-videos --output corpus-benchm
 
 Use STANDARD (`./watch-videos.sh --mode standard`) for high-detail forensic/debug reports, not the 7,500-video ingestion run.
 
+## Always-on watched folder
+
+To make the watched folder survive terminal closes and automatically restart, install the user service once:
+
+```bash
+./install-watcher-service.sh
+```
+
+It watches `drop-videos-here/` continuously in STANDARD mode, writes validated reports into `watched-reports/`, preserves failures in `failed-videos/`, and restarts after a crash. On Linux systems that stop user services after logout, run `loginctl enable-linger xor_sensei` once with administrator access.
+
 ## Running Tests
 
 ```bash
