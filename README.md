@@ -42,24 +42,23 @@ Watched reports include:
 - **Color Science**: caption-excluded luminance/saturation, formal `red_blue_bias` %, skin tone analysis, and vignette/optical proxies.
 - **Audio DSP**: 4x oversampled True Peak (`true_peak_dbtp`), speech LUFS, clarity, SNR, sibilance, ducking detection, and transient classification.
 
-## 50K Corpus Batch Processing & Benchmarking
+## CORPUS_TRAIN production processing
 
 For large-scale dataset training across thousands of videos:
 
 ```bash
-# Optional: Download video manifest concurrently
-python -m backend.batch download videos.jsonl --destination corpus-videos --workers 32
+# Large-scale Core Brain ingestion: CORPUS_TRAIN is the production corpus path.
+python extract-corpus.py --input corpus-videos --output corpus-reports --workers 4 --jsonl corpus-reports/corpus.jsonl
 
-# Batch analyse corpus with multi-process workers (compact / gzip storage options)
-python -m backend.batch analyse corpus-videos --output corpus-reports --mode standard --workers 8 --compact --gzip
-
-# Benchmark throughput on your hardware (steady-state videos/minute)
-python -m backend.batch benchmark corpus-videos --counts 1,10,100 --workers 4
+# Cold throughput benchmark. The directory must contain distinct real videos;
+# cached/duplicate reports are reported separately and never count as full extraction throughput.
+python extract-corpus.py --benchmark-dir benchmark-videos --output corpus-benchmark --workers 4
 ```
+
+Use STANDARD (`./watch-videos.sh --mode standard`) for high-detail forensic/debug reports, not the 7,500-video ingestion run.
 
 ## Running Tests
 
 ```bash
 python -m unittest discover tests
 ```
-

@@ -177,6 +177,8 @@ def validate_report(report: dict) -> None:
         # Training eligibility safety gate
         if a.get("training_eligible") and a.get("verification_status") != "verified":
             raise ValueError("unverified caption alignment marked training_eligible")
+        if a.get("training_eligible") and float(a.get("temporal_error_seconds",0)) > .5:
+            raise ValueError("mistimed caption alignment marked training_eligible")
 
     # 5. Validate speed effects training eligibility
     for effect in report.get("visual", {}).get("speed_effects", []):

@@ -73,7 +73,7 @@ def _normalize_contractions(text: str) -> str:
     return text
 
 
-def _extract_audio_grading_features(audio_samples: np.ndarray, sr: int) -> dict:
+def _extract_audio_grading_features(audio_samples: np.ndarray, sr: int, source_sample_rate: int | None = None) -> dict:
     """Compute rich, inexpensive audio grading features in numpy/scipy in < 0.05s."""
     if len(audio_samples) == 0:
         return {
@@ -95,15 +95,17 @@ def _extract_audio_grading_features(audio_samples: np.ndarray, sr: int) -> dict:
 
     # Ensure float32 in [-1.0, 1.0]
     samples = audio_samples.astype(np.float32)
-    if samples.ndim > 1:
-        # Stereo
-        left, right = samples[:, 0], samples[:, 1]
+    if samples.ndim > 1 and samples.shape[0] >= 2:
+        # PyAV planar audio is [channel, samples]. Preserve it until stereo analysis is complete.
+        left, right = samples[0], samples[1]
         mono = 0.5 * (left + right)
-        diff = left - right
-        stereo_width = float(np.std(diff) / (np.std(mono) + 1e-6))
+        mid, side = mono, 0.5 * (left - right)
+        stereo_width = float(np.sqrt(np.mean(side * side)) / (np.sqrt(np.mean(mid * mid)) + 1e-6))
+        side_mid_ratio = stereo_width
     else:
         mono = samples
         stereo_width = 0.0
+        side_mid_ratio = None
 
     # Sample peak & RMS
     abs_mono = np.abs(mono)
@@ -139,7 +141,7 @@ def _extract_audio_grading_features(audio_samples: np.ndarray, sr: int) -> dict:
     # Fast Spectral Analysis via FFT
     fft_samples = mono[: min(len(mono), sr * 10)]
     if len(fft_samples) > 1024:
-        fft_mag = np.abs(np.fft.rfft(fft_samples))
+        fft_mag = np.abs(np.fft.rfft(fft_samples * np.hanning(len(fft_samples))))
         freqs = np.fft.rfftfreq(len(fft_samples), d=1.0 / sr)
         total_pwr = float(np.sum(fft_mag ** 2)) + 1e-8
 
@@ -153,7 +155,7 @@ def _extract_audio_grading_features(audio_samples: np.ndarray, sr: int) -> dict:
         high_ratio = round(high_pwr / total_pwr, 3)
 
         # Centroid & Rolloff
-        centroid = float(np.sum(freqs * fft_mag) / (np.sum(fft_mag) + 1e-6))
+        centroid = float(np.sum(freqs * (fft_mag ** 2)) / (np.sum(fft_mag ** 2) + 1e-6))
         cum_pwr = np.cumsum(fft_mag ** 2)
         rolloff_idx = np.searchsorted(cum_pwr, 0.85 * total_pwr)
         rolloff_hz = float(freqs[min(rolloff_idx, len(freqs) - 1)])
@@ -171,6 +173,9 @@ def _extract_audio_grading_features(audio_samples: np.ndarray, sr: int) -> dict:
         snr_proxy = 18.0
 
     return {
+        "status": "complete",
+        "source_sample_rate": source_sample_rate or sr,
+        "analysis_sample_rate": sr,
         "sample_peak_dbfs": sample_peak_dbfs,
         "rms_dbfs": rms_dbfs,
         "crest_factor_db": crest_factor_db,
@@ -187,6 +192,7 @@ def _extract_audio_grading_features(audio_samples: np.ndarray, sr: int) -> dict:
         "snr_proxy_db": snr_proxy,
         "sibilance_ratio": sibilance_ratio,
         "stereo_width": round(stereo_width, 2),
+        "stereo_side_to_mid_ratio": round(side_mid_ratio, 3) if side_mid_ratio is not None else None,
         "energy_envelope_16bin": env_16,
     }
 
@@ -212,9 +218,7 @@ def _measure_representative_color(rep_rgb_frames: list[np.ndarray]) -> dict:
             "bright_pixel_fraction": 0.0,
         }
 
-    all_lums = []
-    all_sats = []
-    all_r, all_g, all_b = [], [], []
+    all_lums, all_sats, all_r, all_g, all_b = [], [], [], [], []
 
     for img in rep_rgb_frames:
         arr = img.astype(np.float32) / 255.0
@@ -223,17 +227,14 @@ def _measure_representative_color(rep_rgb_frames: list[np.ndarray]) -> dict:
         mx, mn = np.maximum(np.maximum(r, g), b), np.minimum(np.minimum(r, g), b)
         sat = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-5), 0.0)
 
-        all_lums.append(lum.mean())
-        all_sats.append(sat.mean())
-        all_r.append(r.mean() * 255.0)
-        all_g.append(g.mean() * 255.0)
-        all_b.append(b.mean() * 255.0)
+        all_lums.append(lum.ravel()); all_sats.append(sat.ravel())
+        all_r.append(r.ravel()); all_g.append(g.ravel()); all_b.append(b.ravel())
 
-    lum_mean = float(np.mean(all_lums))
-    sat_mean = float(np.mean(all_sats))
-    r_mean = float(np.mean(all_r))
-    g_mean = float(np.mean(all_g))
-    b_mean = float(np.mean(all_b))
+    lums=np.concatenate(all_lums); sats=np.concatenate(all_sats)
+    r_pixels=np.concatenate(all_r); g_pixels=np.concatenate(all_g); b_pixels=np.concatenate(all_b)
+
+    lum_mean=float(np.mean(lums)); sat_mean=float(np.mean(sats))
+    r_mean=float(np.mean(r_pixels)*255); g_mean=float(np.mean(g_pixels)*255); b_mean=float(np.mean(b_pixels)*255)
 
     # Empirical red/blue bias percentage
     avg_rgb = (r_mean + g_mean + b_mean) / 3.0 + 1e-6
@@ -241,13 +242,13 @@ def _measure_representative_color(rep_rgb_frames: list[np.ndarray]) -> dict:
     wb_interp = "warm" if red_blue_bias > 4.0 else "cool" if red_blue_bias < -4.0 else "neutral"
 
     # Contrast proxy
-    contrast_proxy = round(float(np.std(all_lums) * 3.5 + 0.45), 3)
+    contrast_proxy = round(float(np.percentile(lums,95)-np.percentile(lums,5)), 3)
 
     return {
         "luminance_mean": round(lum_mean, 3),
-        "luminance_p05": round(float(np.percentile(all_lums, 5)), 3),
-        "luminance_p50": round(float(np.median(all_lums)), 3),
-        "luminance_p95": round(float(np.percentile(all_lums, 95)), 3),
+        "luminance_p05": round(float(np.percentile(lums, 5)), 3),
+        "luminance_p50": round(float(np.median(lums)), 3),
+        "luminance_p95": round(float(np.percentile(lums, 95)), 3),
         "contrast_proxy": contrast_proxy,
         "saturation_mean": round(sat_mean, 3),
         "white_balance": {
@@ -262,8 +263,9 @@ def _measure_representative_color(rep_rgb_frames: list[np.ndarray]) -> dict:
             "blue": round(b_mean, 1),
         },
         "dominant_hues": ["warm_skin_tone"] if red_blue_bias > 4.0 else ["cool_teal_blue"] if red_blue_bias < -4.0 else ["balanced_neutral"],
-        "dark_pixel_fraction": round(float(np.mean([float((l < 0.05).mean()) for l in all_lums])), 4),
-        "bright_pixel_fraction": round(float(np.mean([float((l > 0.95).mean()) for l in all_lums])), 4),
+        "dark_pixel_fraction": round(float((lums < .05).mean()), 4),
+        "bright_pixel_fraction": round(float((lums > .95).mean()), 4),
+        "measurement_method":"pixel_statistics_over_sparse_representative_frames",
     }
 
 
@@ -439,14 +441,13 @@ def analyse_corpus(
         caption_intervals.append({"start": round(cap_start, 2), "end": round(duration, 2), "duration": round(duration - cap_start, 2)})
 
     # Audio buffer
-    audio_pcm = []
-    audio_sr = 16000
+    audio_pcm = []; source_audio_sr = int(a_stream.rate or 0) if a_stream else 0; audio_sr = 48000
     if a_stream is not None:
         try:
-            con.seek(0)
+            con.seek(0); resampler=av.AudioResampler(format="fltp",layout="stereo",rate=audio_sr)
             for packet in con.demux(a_stream):
                 for frame in packet.decode():
-                    audio_pcm.append(frame.to_ndarray())
+                    for converted in resampler.resample(frame): audio_pcm.append(converted.to_ndarray().astype(np.float32))
         except Exception:
             pass
     con.close()
@@ -488,10 +489,10 @@ def analyse_corpus(
 
     # Step 3: Audio Grading
     if audio_pcm:
-        audio_arr = np.concatenate(audio_pcm, axis=-1).flatten()
-        audio_features = _extract_audio_grading_features(audio_arr, audio_sr)
+        audio_arr=np.concatenate(audio_pcm,axis=1)
+        audio_features = _extract_audio_grading_features(audio_arr, audio_sr, source_audio_sr)
     else:
-        audio_features = _extract_audio_grading_features(np.array([]), audio_sr)
+        audio_features = _extract_audio_grading_features(np.array([]), audio_sr, source_audio_sr)
 
     # Step 4: Color & Skin Tone Grading
     color_features = _measure_representative_color(rep_rgb_frames)
@@ -519,7 +520,12 @@ def analyse_corpus(
         i_start, i_end = interval["start"], interval["end"]
         # Overlapping spoken words
         matching_words = [w["word"] for w in spoken_words if (w["start"] <= i_end + 0.20 and w["end"] >= i_start - 0.20)]
-        chunk_text = " ".join(matching_words) if matching_words else (sample_texts[idx % len(sample_texts)] if sample_texts else "CAPTION")
+        if matching_words:
+            chunk_text=" ".join(matching_words); text_source="transcript_assisted"; text_confidence=.7
+        elif sample_texts:
+            chunk_text=sample_texts[idx % len(sample_texts)]; text_source="observed_ocr"; text_confidence=.6
+        else:
+            continue
         words_list = chunk_text.split()
         final_captions.append({
             "caption_id": idx,
@@ -529,7 +535,7 @@ def analyse_corpus(
             "duration": interval["duration"],
             "words_visible": len(words_list),
             "displayed_words": words_list,
-            "confidence": 0.90,
+            "confidence": text_confidence,"text_source":text_source,"visual_caption_presence_confidence":.7,"text_confidence":text_confidence,"alignment_confidence":0.0,
             "caption_style_id": "style_0",
             "word_highlighting": {"status": "uniform_or_not_measured", "highlighted_words": []},
         })
@@ -606,7 +612,7 @@ def analyse_corpus(
                 "p05_duration": p05_shot_dur,
                 "p95_duration": p95_shot_dur,
             },
-            "motion_intensity_16bin": [round(float(s[1]), 3) for s in scores[:16]] if scores else [0.0] * 16,
+            "frame_change_energy_16bin": [round(float(np.mean(chunk)),3) for chunk in np.array_split(np.array([s[1] for s in scores]),16)] if scores else [0.0]*16,
             "speed_effects": [],
         },
         "audio": audio_features,
@@ -634,7 +640,7 @@ def analyse_corpus(
             "audio": bool(audio_features.get("status") != "no_audio"),
             "color": True,
             "captions": bool(len(final_captions) > 0),
-            "overall_training_eligible": True,
+            "overall_training_eligible": bool((len(spoken_words)>0 or not bool(a_stream)) and bool(cuts or shots) and audio_features.get("status") in {"complete","no_audio"} and bool(rep_rgb_frames)),
         },
         "runtime": {
             "total_wall_seconds": total_wall_time,
@@ -808,11 +814,15 @@ class CorpusRunner:
 
         self._save_manifest()
         total_time = time.perf_counter() - t0
-        v_per_min = (len(video_paths) * 60.0) / max(total_time, 0.01)
-        projected_7500_hours = (7500.0 * (total_time / max(len(video_paths), 1))) / 3600.0
+        full=sum(1 for item in results if item.get("status") not in {"duplicate_skipped","failed"})
+        duplicates=sum(1 for item in results if item.get("status")=="duplicate_skipped")
+        failed=sum(1 for item in results if item.get("status")=="failed")
+        v_per_min=(full*60.0)/max(total_time,.01)
+        projected_7500_hours=(7500.0/max(full/total_time,.000001))/3600.0
 
         return {
-            "total_processed": len(video_paths),
+            "requested": len(video_paths), "full_extractions":full,"duplicates":duplicates,"cache_hits":duplicates,"skipped_completed":duplicates,"failed":failed,
+            "total_processed": full,
             "total_wall_seconds": round(total_time, 2),
             "videos_per_minute": round(v_per_min, 2),
             "projected_7500_hours": round(projected_7500_hours, 2),

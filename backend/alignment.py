@@ -188,7 +188,7 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
 
     for cap in captions:
         displayed_words = cap.get("text", "").split()
-        cap_tokens = [w.lower() for w in re.findall(r"\w+", cap.get("text", ""))]
+        cap_tokens = _alignment_tokens(cap.get("text", ""))
         if not cap_tokens:
             continue
         total_caption_words += len(cap_tokens)
@@ -215,7 +215,8 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
             for idx, word in candidate_words:
                 if idx < temp_word_idx:
                     continue
-                w_clean = re.sub(r"[^\w\s]", "", word.get("word", "")).lower()
+                w_tokens = _alignment_tokens(word.get("word", ""))
+                w_clean = w_tokens[0] if w_tokens else ""
                 if w_clean == c_token:
                     is_reused = idx in globally_assigned_indices
                     if is_reused:
@@ -274,7 +275,7 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
         emphasized_displayed = [w for w in highlighted_list if w in cap.get("text", "")]
 
         # Quality gating & verification
-        if match_score >= 0.70 and monotonicity_passed and reused_word_count == 0 and temporal_error <= 1.25:
+        if match_score >= 0.70 and monotonicity_passed and reused_word_count == 0 and temporal_error <= .5:
             verification_status = "verified"
             training_eligible = True
         elif match_score >= 0.40 and monotonicity_passed:
@@ -305,6 +306,7 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
             "status": "aligned" if match_score >= 0.50 else "partial_or_graphic_text",
         }
         cap["transcript_alignment"] = alignment_entry
+        cap["alignment_confidence"] = match_score
         matched_pairs.append(alignment_entry)
 
     overall_coverage = round(matched_caption_words / max(total_caption_words, 1), 3) if total_caption_words else 0.0
@@ -316,6 +318,11 @@ def _align_transcript_with_captions(words: list[dict], captions: list[dict]) -> 
         "verified_aligned_count": sum(1 for a in matched_pairs if a["training_eligible"]),
         "alignments": matched_pairs,
     }
+
+
+def _alignment_tokens(text: str) -> list[str]:
+    """Normalize case/punctuation but preserve contractions as one lexical token."""
+    return [token.replace("’", "'").lower() for token in re.findall(r"[\w]+(?:['’][\w]+)?", text)]
 
 
 def _extract_semantic_sections(duration: float, sentences: list[dict], edits: list[dict], overlay: list[dict]) -> list[dict]:
@@ -448,4 +455,3 @@ def _master_timeline(report: dict) -> list[dict]:
         })
 
     return sorted(entries, key=lambda item: item["time"])
-
