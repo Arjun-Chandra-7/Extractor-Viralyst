@@ -1,74 +1,48 @@
-# VIRALYST Extractor
+# VIRALYST EXTRACTOR
 
-See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the evidence contract and comprehensive implemented capability matrix.
+Drop a video into [drop-videos-here](drop-videos-here/). The always-on service processes it, validates an individual JSON report, saves that report in [watched-reports](watched-reports/), and only then deletes the source. Failed inputs are preserved in [failed-videos](failed-videos/).
 
-Reports are schema-validated and atomically published. `processing.runtime` records the active decode/CUDA path and device details.
+## Normal use
 
-Fast, per-video feature extraction and multimodal intelligence for short-form video datasets (1 to 50,000+ videos). The local STANDARD analyser combines PyAV decoding, GPU Faster-Whisper, RapidOCR with dense tracking, OpenCV YuNet face/subject tracking, BS.1770 / 4x True-Peak audio grading, caption-excluded color science, and evidence-gated editing verification without cloud roundtrips.
-
-## Requirements & GPU Acceleration
-
-- **OS**: Linux / macOS / Windows
-- **Python**: 3.10 - 3.13
-- **Hardware**: NVIDIA GPU with CUDA recommended for fast ASR (Faster-Whisper CUDA float16) and OpenCV DNN. Runs seamlessly on CPU when CUDA is absent.
+You do not need to start anything manually. The service is installed as `viralyst-extractor.service` and runs in STANDARD mode.
 
 ```bash
-# Install dependencies
-python -m pip install -r requirements.txt
+systemctl --user status viralyst-extractor.service
+journalctl --user -u viralyst-extractor.service -f
 ```
 
-## Running the Web Interface
+If it is stopped:
 
 ```bash
-uvicorn backend.main:app --reload --port 8080
+systemctl --user restart viralyst-extractor.service
 ```
 
-Open `http://localhost:8080` in your browser. Upload any video to inspect real-time extraction results and download the report JSON.
-
-## Watched Folder Workflow
-
-Run the watcher and leave its terminal open:
+For persistence after logout/reboot on Linux:
 
 ```bash
-./watch-videos.sh
+loginctl enable-linger xor_sensei
 ```
 
-Copy videos into `drop-videos-here/`. The watcher processes each video, creates a validated report in `watched-reports/`, and cleans up source files.
+## What each report contains
 
-Watched reports include:
-- **GPU Faster-Whisper transcript**: non-overlapping monotonic word timestamps, punctuation, language detection, pauses, and multi-factor prosodic emphasis (pitch/F0, duration, energy, stopword filtering).
-- **Dense ROI OCR**: false-positive filtering, typography estimation, animation detection, word highlighting, and transcript ↔ caption alignment.
-- **Visual & Editing**: subject tracking, optical flow dynamics, hard cut vs jump cut vs scene change discrimination, transform estimation (with subject continuity gating), and freeze frames.
-- **Color Science**: caption-excluded luminance/saturation, formal `red_blue_bias` %, skin tone analysis, and vignette/optical proxies.
-- **Audio DSP**: 4x oversampled True Peak (`true_peak_dbtp`), speech LUFS, clarity, SNR, sibilance, ducking detection, and transient classification.
+Each report is independent and evidence-first. It includes source metadata, verified edit/shot structure, timed spoken transcript, separate OCR/caption tracking, sparse color measurements, audio grading, cross-modal timeline events, confidence/provenance, and training eligibility. It does not promote unverified guesses into training data.
 
-## CORPUS_TRAIN production processing
+## Corpus processing
 
-For large-scale dataset training across thousands of videos:
+For large Core Brain ingestion, use CORPUS_TRAIN rather than the watched folder:
 
 ```bash
-# Large-scale Core Brain ingestion: CORPUS_TRAIN is the production corpus path.
 python extract-corpus.py --input corpus-videos --output corpus-reports --workers 4 --jsonl corpus-reports/corpus.jsonl
+```
 
-# Cold throughput benchmark. The directory must contain distinct real videos;
-# cached/duplicate reports are reported separately and never count as full extraction throughput.
+Benchmark only with a folder of distinct real videos:
+
+```bash
 python extract-corpus.py --benchmark-dir benchmark-videos --output corpus-benchmark --workers 4
 ```
 
-Use STANDARD (`./watch-videos.sh --mode standard`) for high-detail forensic/debug reports, not the 7,500-video ingestion run.
+Full extraction throughput excludes duplicates, cached reports, skipped files, and failures.
 
-## Always-on watched folder
+## For an AI agent
 
-To make the watched folder survive terminal closes and automatically restart, install the user service once:
-
-```bash
-./install-watcher-service.sh
-```
-
-It watches `drop-videos-here/` continuously in STANDARD mode, writes validated reports into `watched-reports/`, preserves failures in `failed-videos/`, and restarts after a crash. On Linux systems that stop user services after logout, run `loginctl enable-linger xor_sensei` once with administrator access.
-
-## Running Tests
-
-```bash
-python -m unittest discover tests
-```
+Read [SKILL.md](SKILL.md). It is the authoritative operating procedure and safety contract for managing this repository.
