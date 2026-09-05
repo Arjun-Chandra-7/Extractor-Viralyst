@@ -7,6 +7,8 @@ from pathlib import Path
 import av
 import numpy as np
 
+from .contract import verified_cut_events
+
 _FACE_DETECTOR = None
 
 
@@ -137,8 +139,8 @@ def build_shots(events: list[dict], duration: float) -> list[dict]:
 
 def verified_edit_summary(events: list[dict], shots: list[dict], duration: float) -> dict:
     verified = [e for e in events if e.get("verification_status") == "verified"]
-    cut_types = {"hard_cut", "jump_cut", "scene_change"}
-    cuts = [e for e in verified if e.get("type") in cut_types]
+    # Same canonical collection the contract validator checks against.
+    cuts = verified_cut_events(events)
     durations = [shot["duration"] for shot in shots]
     type_counts = {}
     for e in verified:

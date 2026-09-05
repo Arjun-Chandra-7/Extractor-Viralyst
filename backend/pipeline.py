@@ -10,7 +10,7 @@ import av
 import numpy as np
 
 from .editing import dense_verify_full_video, verified_edit_summary
-from .contract import VERSION, content_hash, runtime_profile
+from .contract import CUT_EVENT_TYPES, VERSION, content_hash, runtime_profile
 
 MAX_SAMPLES = 96
 _WHISPER_MODELS = {}
@@ -165,9 +165,9 @@ def _standard_training_features(report: dict) -> dict:
         "speech_lufs": audio.get("speech", {}).get("speech_lufs"),
         "dynamic_range_db": audio.get("dynamics", {}).get("dynamic_range_db"),
         "true_peak_dbtp": audio.get("loudness", {}).get("true_peak_dbtp", {}).get("value"),
-        "verified_training_cut_count": sum(item["type"] in {"hard_cut", "jump_cut", "scene_change"} for item in eligible_events),
+        "verified_training_cut_count": sum(item["type"] in CUT_EVENT_TYPES for item in eligible_events),
         "verified_training_cuts_per_minute": round(
-            sum(item["type"] in {"hard_cut", "jump_cut", "scene_change"} for item in eligible_events) * 60 / duration, 2
+            sum(item["type"] in CUT_EVENT_TYPES for item in eligible_events) * 60 / duration, 2
         ),
         "subject_presence_ratio": report["visual"].get("subjects", {}).get("subject_presence_ratio", 0.0),
     }

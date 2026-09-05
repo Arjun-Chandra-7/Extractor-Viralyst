@@ -7,6 +7,25 @@ import json
 import subprocess
 from pathlib import Path
 
+# The complete set of cut subtypes.
+#
+# The boundary detector emits every shot boundary as "hard_cut" and then refines
+# the subtype in place (see editing.py: jump_cut when the subject is continuous,
+# scene_change on high histogram discontinuity with a subject change). All three
+# are therefore cuts by construction, and any count of "cuts" must include all
+# three. Defined here, the lowest-level module, so the producer, the training
+# features and this validator cannot drift apart.
+CUT_EVENT_TYPES = frozenset({"hard_cut", "jump_cut", "scene_change"})
+
+
+def verified_cut_events(events: list[dict]) -> list[dict]:
+    """The canonical verified-cut collection every cut count derives from."""
+    return [
+        event for event in events
+        if event.get("verification_status") == "verified"
+        and event.get("type") in CUT_EVENT_TYPES
+    ]
+
 LIFECYCLES = {"not_requested", "queued", "running", "complete", "partial", "deferred", "failed"}
 VERSION = "2026.08.evidence-first"
 
@@ -159,7 +178,7 @@ def validate_report(report: dict) -> None:
     # 3. Validate edit summary
     summary = report["editing"].get("summary", {})
     if summary.get("cut_count") is not None:
-        count = sum(item.get("type") in {"hard_cut", "jump_cut"} for item in report["editing"].get("verified_events", []))
+        count = len(verified_cut_events(report["editing"].get("verified_events", [])))
         if count != summary["cut_count"]:
             raise ValueError("cut summary disagrees with verified events")
 
